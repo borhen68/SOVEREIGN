@@ -105,7 +105,7 @@ Useful execution flags (body fields on `POST /api/company/execute` or resume):
   - postgres mode requires `pg`
   - redis modes require `redis`
 - Prisma datastore no longer leaves channel/runtime/security/memory methods as empty stubs.
-- Docker image now installs backend adapters needed by `STATE_BACKEND=postgres_redis`.
+- Backend adapters (`pg`, `redis`) are now first-class npm dependencies for reliable local, CI, and Docker runs.
 
 ### Local CLI UI (agent select + model select + chat)
 

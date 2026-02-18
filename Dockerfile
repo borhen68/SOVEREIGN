@@ -3,10 +3,8 @@ FROM node:20-alpine
 WORKDIR /app
 
 COPY package*.json ./
-# Install ALL dependencies (including dev) so we can build
-RUN npm install
-# Runtime adapters used by STATE_BACKEND=postgres_redis
-RUN npm install --no-save pg redis
+# Install ALL dependencies (including dev) so we can build reproducibly
+RUN npm ci
 
 COPY . .
 

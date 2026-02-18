@@ -297,7 +297,14 @@ export function createApi(options = {}) {
             workspaceId: url.searchParams.get("workspaceId") ?? undefined,
             limit: Number(url.searchParams.get("limit") ?? 12),
             runtimeLimit: Number(url.searchParams.get("runtimeLimit") ?? undefined),
-            eventLimit: Number(url.searchParams.get("eventLimit") ?? undefined)
+            eventLimit: Number(url.searchParams.get("eventLimit") ?? undefined),
+            metricsLimit: Number(url.searchParams.get("metricsLimit") ?? undefined),
+            noCache:
+              ["1", "true", "yes"].includes(
+                String(url.searchParams.get("noCache") ?? "")
+                  .trim()
+                  .toLowerCase()
+              )
           });
           return jsonResponse(res, 200, { snapshot });
         }

@@ -5,6 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { DataStore } from "../src/store/data-store.js";
 import { createApi } from "../src/server.js";
+import { createStateBackendService } from "../src/infra/state-backend-service.js";
 
 function callApi(handler, input) {
   const body = input.body === undefined ? "" : JSON.stringify(input.body);
@@ -100,4 +101,16 @@ test("system persistence endpoint returns backend status", async () => {
   assert.equal(response.status, 200);
   assert.equal(response.body.backend.mode, "postgres_redis");
   assert.equal(response.body.backend.postgres.enabled, true);
+});
+
+test("state backend rejects unsafe SQL table identifiers", () => {
+  assert.throws(
+    () =>
+      createStateBackendService({
+        mode: "postgres",
+        databaseUrl: "postgres://user:pass@localhost:5432/app",
+        tableName: "state;drop_table"
+      }),
+    /STATE_BACKEND_TABLE must be a valid SQL identifier/
+  );
 });

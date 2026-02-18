@@ -43,6 +43,11 @@ function avg(values) {
   return Number((total / values.length).toFixed(3));
 }
 
+function parseBool(value) {
+  const normalized = safeString(value).toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes";
+}
+
 async function safeCall(run, fallback) {
   try {
     const value = await run();
@@ -208,13 +213,46 @@ export class DashboardService {
     this.heartbeatService = options.heartbeatService;
     this.channelGatewayService = options.channelGatewayService;
     this.commandQueue = options.commandQueue;
+    this.snapshotCacheTtlMs = clampInt(
+      options.snapshotCacheTtlMs ?? process.env.DASHBOARD_CACHE_TTL_MS,
+      1500,
+      0,
+      15000
+    );
+    this.snapshotCache = new Map();
+  }
+
+  #cacheKey(input = {}) {
+    return JSON.stringify({
+      workspaceId: safeString(input.workspaceId, "default"),
+      limit: clampInt(input.limit, 12, 3, 50),
+      runtimeLimit: clampInt(input.runtimeLimit, 50, 10, 200),
+      eventLimit: clampInt(input.eventLimit, 120, 20, 1000),
+      metricsLimit: clampInt(input.metricsLimit, 1500, 50, 5000)
+    });
   }
 
   async getSnapshot(input = {}) {
     const workspaceId = safeString(input.workspaceId, "default");
     const limit = clampInt(input.limit, 12, 3, 50);
     const runtimeLimit = clampInt(input.runtimeLimit, Math.max(30, limit * 4), 10, 200);
-    const eventLimit = clampInt(input.eventLimit, 160, 20, 1000);
+    const eventLimit = clampInt(input.eventLimit, 120, 20, 1000);
+    const metricsLimit = clampInt(input.metricsLimit, 1500, 50, 5000);
+    const noCache = parseBool(input.noCache);
+
+    const cacheKey = this.#cacheKey({
+      workspaceId,
+      limit,
+      runtimeLimit,
+      eventLimit,
+      metricsLimit
+    });
+    if (!noCache && this.snapshotCacheTtlMs > 0) {
+      const cached = this.snapshotCache.get(cacheKey);
+      if (cached && cached.expiresAt > Date.now()) {
+        return cached.snapshot;
+      }
+    }
 
     const [
       rawRuns,
@@ -244,17 +282,14 @@ export class DashboardService {
         successRate: 0,
         blockedRate: 0
       }),
-      safeCall(() => this.observabilityService.getMetrics({ workspaceId, limit: 5000 }), {
+      safeCall(() => this.observabilityService.getMetrics({ workspaceId, limit: metricsLimit }), {
         total: 0,
         traces: 0,
         latencyMs: { p95: 0 },
         tokenUsage: { total: 0 },
         costUsd: { total: 0 }
       }),
-      safeCall(
-        () => this.observabilityService.listTraces({ workspaceId, source: "company", limit: Math.max(limit * 3, 30) }),
-        []
-      ),
+      safeCall(() => this.observabilityService.listTraces({ workspaceId, source: "company", limit: Math.max(limit * 2, 20) }), []),
       safeCall(() => this.observabilityService.listEvents({ workspaceId, limit: eventLimit }), []),
       safeCall(() => this.agentService.listAgents(workspaceId), []),
       safeCall(() => this.autopilotService.listGoals({ workspaceId, limit: 50 }), []),
@@ -267,7 +302,7 @@ export class DashboardService {
     const runs = sortRecent(rawRuns, (run) => run.updatedAt ?? run.startedAt ?? run.createdAt).slice(0, limit);
     const runSummaries = runs.map((run) => mapRunSummary(run, missionById));
 
-    const missionIds = unique(runs.map((run) => run.missionId).filter(Boolean));
+    const missionIds = unique(runs.map((run) => run.missionId).filter(Boolean)).slice(0, Math.max(limit, 10));
     const missionCouncilRuns = await Promise.all(
       missionIds.map(async (missionId) => {
         const list = await safeCall(() => this.councilService.listMissionCouncilRuns(missionId), []);
@@ -278,7 +313,10 @@ export class DashboardService {
       missionCouncilRuns.flat(),
       (run) => run.startedAt ?? run.createdAt ?? run.endedAt
     ).slice(0, Math.max(limit * 3, 24));
-    const councilIds = unique(councilRuns.map((run) => run.councilId).filter(Boolean));
+    const councilIds = unique(councilRuns.map((run) => run.councilId).filter(Boolean)).slice(
+      0,
+      Math.max(limit * 2, 16)
+    );
     const councils = await Promise.all(
       councilIds.map((councilId) => safeCall(() => this.councilService.getCouncil(councilId), null))
     );
@@ -324,7 +362,7 @@ export class DashboardService {
       ? this.commandQueue.getStats()
       : null;
 
-    return {
+    const snapshot = {
       generatedAt: nowIso(),
       workspaceId,
       stats: {
@@ -452,5 +490,21 @@ export class DashboardService {
       },
       queue: queueStats
     };
+
+    if (this.snapshotCacheTtlMs > 0) {
+      this.snapshotCache.set(cacheKey, {
+        snapshot,
+        expiresAt: Date.now() + this.snapshotCacheTtlMs
+      });
+      if (this.snapshotCache.size > 80) {
+        for (const [key, value] of this.snapshotCache) {
+          if (!value || value.expiresAt <= Date.now()) {
+            this.snapshotCache.delete(key);
+          }
+        }
+      }
+    }
+
+    return snapshot;
   }
 }

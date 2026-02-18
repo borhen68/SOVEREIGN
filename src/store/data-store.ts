@@ -44,7 +44,6 @@ export class DataStore {
     this.externalPersistence = options.externalPersistence ?? null;
     this.state = this.#loadState();
     this.ready = Promise.resolve();
-    this.ready = Promise.resolve();
     this.persistenceQueue = Promise.resolve();
     this.externalPersistenceError = null;
     this.debounceTimer = null;

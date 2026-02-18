@@ -29,6 +29,17 @@ function parseMode(value) {
   return "file";
 }
 
+function parseTableName(value, fallback = "sovereign_state") {
+  const tableName = safeString(value, fallback);
+  // Guard against SQL identifier injection by allowing only simple identifiers.
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(tableName)) {
+    throw new Error(
+      "STATE_BACKEND_TABLE must be a valid SQL identifier (letters, numbers, underscores; cannot start with a number)."
+    );
+  }
+  return tableName;
+}
+
 function serializeState(state) {
   return JSON.stringify(state ?? {});
 }
@@ -50,7 +61,10 @@ export class StateBackendService {
     this.mode = parseMode(options.mode ?? process.env.STATE_BACKEND);
     this.databaseUrl = safeString(options.databaseUrl ?? process.env.DATABASE_URL);
     this.redisUrl = safeString(options.redisUrl ?? process.env.REDIS_URL);
-    this.tableName = safeString(options.tableName ?? process.env.STATE_BACKEND_TABLE, "sovereign_state");
+    this.tableName = parseTableName(
+      options.tableName ?? process.env.STATE_BACKEND_TABLE,
+      "sovereign_state"
+    );
     this.stateKey = safeString(options.stateKey ?? process.env.STATE_BACKEND_KEY, "default");
     this.redisKey = safeString(options.redisKey ?? process.env.STATE_REDIS_KEY, "sovereign:state:default");
     this.redisTtlSeconds = Number.isInteger(Number(options.redisTtlSeconds))
