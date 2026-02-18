@@ -21,7 +21,7 @@
   "license": "Apache-2.0",
   "devDependencies": {
     "@types/node": "^25.2.3",
-    "prisma": "^6.19.2",
+    "prisma": "^7.4.0",
     "typescript": "^5.9.3"
   },
   "dependencies": {
