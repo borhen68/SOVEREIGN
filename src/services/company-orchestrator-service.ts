@@ -94,6 +94,13 @@ export class CompanyOrchestratorService {
     this.securityFabricService = options.securityFabricService ?? null;
     this.observabilityService = options.observabilityService ?? null;
     this.evaluationService = options.evaluationService ?? null;
+    this.notificationOutboxService = options.notificationOutboxService ?? null;
+    this.councilStepTimeoutMs = clampInt(
+      options.councilStepTimeoutMs ?? process.env.COMPANY_COUNCIL_STEP_TIMEOUT_MS,
+      180000,
+      5000,
+      900000
+    );
   }
 
   async listRuns(filters = {}) {
@@ -196,6 +203,7 @@ export class CompanyOrchestratorService {
         objective,
         kpi: safeString(input.kpi, "Objective completed with verification and delivered artifacts."),
         deadline: safeString(input.deadline, buildDeadline(14)),
+        budgetCap: Number.isFinite(Number(input.budgetCap)) ? Number(input.budgetCap) : null,
         policyPreset
       });
       await this.missionService.startMission(mission.id);
@@ -457,6 +465,8 @@ export class CompanyOrchestratorService {
     if (!missionId) {
       throw this.#badRequest("missionId is required.");
     }
+    const mission = await this.missionService.getMission(missionId);
+    const missionBudgetCap = this.#resolveMissionBudgetCap(mission?.budgetCap);
 
     const notifyTargets = Array.isArray(input.notifyTargets) ? input.notifyTargets : [];
     const maxRetries = clampInt(input.maxRetries, 2, 1, 5);
@@ -487,6 +497,77 @@ export class CompanyOrchestratorService {
 
     for (let workstreamIndex = startWorkstreamIndex; workstreamIndex < workstreams.length; workstreamIndex += 1) {
       const stream = workstreams[workstreamIndex];
+      const budgetGate = await this.#checkMissionBudget({
+        workspaceId,
+        missionId,
+        runId,
+        budgetCap: missionBudgetCap
+      });
+      if (!budgetGate.allowed) {
+        const message = `Mission budget cap exceeded before workstream ${workstreamIndex + 1} (${safeString(stream.title, stream.id || "workstream")}). Spend ${budgetGate.usage.costUsd} / cap ${missionBudgetCap}.`;
+        const failed = await this.store.updateCompanyRun(runId, {
+          status: COMPANY_STATUS.FAILED,
+          completedAt: nowIso(),
+          updatedAt: nowIso(),
+          summary: message,
+          pendingEscalation: null,
+          resumeState: null,
+          result: {
+            executionResults,
+            successCount: executionResults.filter((item) => item.success).length,
+            failureCount: executionResults.filter((item) => !item.success).length,
+            budget: {
+              capUsd: missionBudgetCap,
+              spentUsd: budgetGate.usage.costUsd,
+              tokenUsage: budgetGate.usage.tokenUsage
+            }
+          }
+        });
+        await this.#logStage(
+          runId,
+          "execution.budget_blocked",
+          message,
+          {
+            missionId,
+            budgetCap: missionBudgetCap,
+            spentUsd: budgetGate.usage.costUsd,
+            tokenUsage: budgetGate.usage.tokenUsage
+          },
+          {
+            traceId,
+            spanId: executionSpan?.id ?? null
+          }
+        );
+        await this.#notifyTargets(
+          notifyTargets,
+          workspaceId,
+          [
+            "SOVEREIGN company run failed due to mission budget cap.",
+            `Objective: ${objective}`,
+            `Spent: ${budgetGate.usage.costUsd} USD / Cap: ${missionBudgetCap} USD`
+          ].join("\n"),
+          {
+            runId,
+            missionId,
+            source: "company.budget_cap"
+          }
+        );
+        await this.#endSpan(executionSpan, {
+          traceId,
+          workspaceId,
+          runId,
+          missionId,
+          status: COMPANY_STATUS.FAILED,
+          level: "warning",
+          metadata: {
+            reason: "budget_cap_exceeded",
+            budgetCap: missionBudgetCap,
+            spentUsd: budgetGate.usage.costUsd
+          }
+        });
+        return failed;
+      }
+
       const preExecutionEscalation = this.#assessRuntimeWorkstreamEscalation({
         objective,
         workstream: stream,
@@ -736,7 +817,12 @@ export class CompanyOrchestratorService {
     await this.#notifyTargets(
       notifyTargets,
       workspaceId,
-      [`SOVEREIGN company run ${finalStatus}.`, `Objective: ${objective}`, summary].join("\n")
+      [`SOVEREIGN company run ${finalStatus}.`, `Objective: ${objective}`, summary].join("\n"),
+      {
+        runId,
+        missionId,
+        source: "company.execute"
+      }
     );
     await this.#logStage(
       runId,
@@ -811,7 +897,12 @@ export class CompanyOrchestratorService {
         "SOVEREIGN run paused for human approval.",
         `Objective: ${safeString(input.objective, run.objective)}`,
         `Reason: ${safeString(input.reason)}`
-      ].join("\n")
+      ].join("\n"),
+      {
+        runId: run.id,
+        missionId: safeString(input.missionId, run.missionId),
+        source: "company.waiting_human"
+      }
     );
     await this.#logStage(
       run.id,
@@ -1093,20 +1184,27 @@ export class CompanyOrchestratorService {
   }
 
   async #runCouncilQueued(missionId, input) {
+    const executeCouncil = async () => {
+      return this.#withTimeout(
+        () => this.councilService.runCouncil(missionId, input),
+        this.councilStepTimeoutMs,
+        `company.council timeout after ${this.councilStepTimeoutMs}ms (mission ${missionId})`
+      );
+    };
     if (!this.commandQueue) {
-      return this.councilService.runCouncil(missionId, input);
+      return executeCouncil();
     }
     const queued = await this.commandQueue.enqueue(
       {
         lane: `mission:${missionId}`,
         label: "company.council"
       },
-      async () => this.councilService.runCouncil(missionId, input)
+      async () => executeCouncil()
     );
     return queued.value;
   }
 
-  async #notifyTargets(targets, workspaceId, text) {
+  async #notifyTargets(targets, workspaceId, text, context = {}) {
     if (!this.channelGatewayService || !Array.isArray(targets) || targets.length === 0) {
       return;
     }
@@ -1124,13 +1222,153 @@ export class CompanyOrchestratorService {
           userId: safeString(target.userId, "company"),
           text,
           metadata: {
-            source: "company.execute"
+            source: safeString(context.source, "company.execute")
           }
         });
-      } catch {
-        // Best-effort notifications should not fail mission execution.
+      } catch (error) {
+        if (
+          this.notificationOutboxService &&
+          typeof this.notificationOutboxService.enqueue === "function"
+        ) {
+          await this.notificationOutboxService.enqueue({
+            workspaceId: safeString(target.workspaceId, workspaceId),
+            channelId,
+            chatId,
+            userId: safeString(target.userId, "company"),
+            text,
+            metadata: {
+              source: safeString(context.source, "company.execute"),
+              runId: safeString(context.runId) || null,
+              missionId: safeString(context.missionId) || null
+            },
+            runId: safeString(context.runId) || null,
+            missionId: safeString(context.missionId) || null
+          });
+        }
+        await this.#observe(
+          "company.notify.failed",
+          "Direct notification send failed; queued in outbox.",
+          {
+            channelId,
+            chatId,
+            error: error instanceof Error ? error.message : String(error)
+          },
+          {
+            workspaceId: safeString(target.workspaceId, workspaceId),
+            traceId: safeString(context.traceId),
+            runId: safeString(context.runId) || null,
+            missionId: safeString(context.missionId) || null
+          }
+        );
       }
     }
+  }
+
+  #resolveMissionBudgetCap(rawBudgetCap) {
+    const parsed = Number(rawBudgetCap);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      return null;
+    }
+    return Number(parsed.toFixed(6));
+  }
+
+  async #checkMissionBudget(input = {}) {
+    const budgetCap = this.#resolveMissionBudgetCap(input.budgetCap);
+    if (!budgetCap) {
+      return {
+        allowed: true,
+        usage: {
+          costUsd: 0,
+          tokenUsage: 0
+        }
+      };
+    }
+    const usage = await this.#computeMissionUsage({
+      workspaceId: safeString(input.workspaceId, "default"),
+      missionId: safeString(input.missionId),
+      runId: safeString(input.runId)
+    });
+    return {
+      allowed: usage.costUsd < budgetCap,
+      usage
+    };
+  }
+
+  async #computeMissionUsage(input = {}) {
+    const workspaceId = safeString(input.workspaceId, "default");
+    const missionId = safeString(input.missionId);
+    const runId = safeString(input.runId);
+    if (!missionId || !this.observabilityService) {
+      return {
+        costUsd: 0,
+        tokenUsage: 0
+      };
+    }
+
+    if (typeof this.observabilityService.getUsage === "function") {
+      const usage = await this.observabilityService.getUsage({
+        workspaceId,
+        missionId,
+        runId,
+        source: "llm"
+      });
+      return {
+        costUsd: Number(Number(usage?.costUsd ?? 0).toFixed(6)),
+        tokenUsage: Math.max(0, Math.round(Number(usage?.tokenUsage ?? 0)))
+      };
+    }
+
+    if (typeof this.observabilityService.listEvents !== "function") {
+      return {
+        costUsd: 0,
+        tokenUsage: 0
+      };
+    }
+    const events = await Promise.resolve(
+      this.observabilityService.listEvents({
+        workspaceId,
+        missionId,
+        runId,
+        source: "llm",
+        limit: 50000
+      })
+    );
+    let costUsd = 0;
+    let tokenUsage = 0;
+    for (const event of events ?? []) {
+      if (Number.isFinite(Number(event?.costUsd))) {
+        costUsd += Math.max(0, Number(event.costUsd));
+      }
+      if (Number.isFinite(Number(event?.tokenUsage))) {
+        tokenUsage += Math.max(0, Number(event.tokenUsage));
+      }
+    }
+    return {
+      costUsd: Number(costUsd.toFixed(6)),
+      tokenUsage: Math.round(tokenUsage)
+    };
+  }
+
+  async #withTimeout(run, timeoutMs, message) {
+    const safeTimeout = clampInt(timeoutMs, 180000, 1000, 3600000);
+    return await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const timeoutError = new Error(safeString(message, "Operation timed out."));
+        timeoutError.statusCode = 504;
+        timeoutError.code = "STEP_TIMEOUT";
+        reject(timeoutError);
+      }, safeTimeout);
+      Promise.resolve()
+        .then(run)
+        .then((value) => {
+          clearTimeout(timer);
+          resolve(value);
+        })
+        .catch((error) => {
+          clearTimeout(timer);
+          reject(error);
+        });
+    });
   }
 
   async #logStage(runId, stage, message, payload = {}, context = {}) {

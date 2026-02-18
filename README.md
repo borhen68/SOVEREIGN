@@ -110,6 +110,38 @@ Useful execution flags (body fields on `POST /api/company/execute` or resume):
 - Prisma datastore no longer leaves channel/runtime/security/memory methods as empty stubs.
 - Backend adapters (`pg`, `redis`) are now first-class npm dependencies for reliable local, CI, and Docker runs.
 
+### 6) Budget, Timeout, and Durable Delivery Guards
+- Mission budget cap circuit breaker is now enforced in execution loops:
+  - company orchestrator checks budget before each workstream
+  - autopilot checks budget before planning and before task execution
+- Council execution now has configurable step timeout guards:
+  - `COMPANY_COUNCIL_STEP_TIMEOUT_MS`
+  - `AUTOPILOT_STEP_TIMEOUT_MS`
+- Notification delivery is now durable:
+  - failed sends are queued in a persistent outbox
+  - heartbeat tick retries pending outbox items with exponential backoff
+  - outbox works with file store and Prisma/Postgres store
+
+### 7) Soul Versioning + Rollback
+- Agents now persist soul version history with metadata (`reason`, `source`, `outcome`, `performanceScore`).
+- Soul evolution appends immutable versions instead of mutating in place only.
+- Rollback creates a new version that restores a prior soul snapshot.
+- New APIs:
+  - `GET /api/architecture/soul/:agentId/history`
+  - `POST /api/architecture/soul/:agentId/rollback`
+
+### 8) OpenAPI + Typed SDK
+- OpenAPI spec is now available at:
+  - `GET /api/openapi`
+  - `GET /api/openapi.json`
+- Exported artifact can be generated at repo root:
+  - `npm run openapi:export` -> `openapi.json`
+- Typed TypeScript SDK available at:
+  - `src/sdk/sovereign-client.ts`
+  - publishable package layout: `sdk/ts` (`@sovereign/client`)
+- Python client starter available at:
+  - `sdk/python/sovereign_client.py`
+
 ### Local CLI UI (agent select + model select + chat)
 
 ```bash
@@ -199,6 +231,8 @@ export CHAT_MODEL_FALLBACKS="anthropic/claude-3-5-sonnet-latest,gemini/gemini-1.
 
 ### Health
 - `GET /health`
+- `GET /api/openapi`
+- `GET /api/openapi.json`
 
 ### Live Dashboard
 - `GET /dashboard` (real-time web UI for orchestrator, council debate, and risk)
@@ -247,6 +281,8 @@ export CHAT_MODEL_FALLBACKS="anthropic/claude-3-5-sonnet-latest,gemini/gemini-1.
 - `GET /api/architecture/blueprint`
 - `POST /api/architecture/company-plan`
 - `POST /api/architecture/soul/evolve`
+- `GET /api/architecture/soul/:agentId/history`
+- `POST /api/architecture/soul/:agentId/rollback`
 
 ### Company Orchestrator
 - `GET /api/company/runs`
@@ -295,6 +331,8 @@ export CHAT_MODEL_FALLBACKS="anthropic/claude-3-5-sonnet-latest,gemini/gemini-1.
 - `POST /api/heartbeat/jobs/:jobId/pause`
 - `POST /api/heartbeat/jobs/:jobId/resume`
 - `GET /api/heartbeat/runs`
+- `GET /api/heartbeat/outbox`
+- `POST /api/heartbeat/outbox/process`
 
 ### Setup Wizard
 - `POST /api/setup/wizard/run`
@@ -486,6 +524,33 @@ curl -X POST http://localhost:3001/api/architecture/soul/evolve \
   }'
 ```
 
+## Example: List Soul History
+
+```bash
+curl "http://localhost:3001/api/architecture/soul/<agentId>/history?limit=20"
+```
+
+## Example: Roll Back Soul to Prior Version
+
+```bash
+curl -X POST http://localhost:3001/api/architecture/soul/<agentId>/rollback \
+  -H "Content-Type: application/json" \
+  -d '{
+    "targetVersion": 1,
+    "reason": "rollback after regression"
+  }'
+```
+
+## Example: Process Notification Outbox Retries
+
+```bash
+curl -X POST http://localhost:3001/api/heartbeat/outbox/process \
+  -H "Content-Type: application/json" \
+  -d '{
+    "limit": 50
+  }'
+```
+
 ## Example: Auto-Generate Agent Skill From Task
 
 ```bash
@@ -533,6 +598,33 @@ curl -X POST http://localhost:3001/api/llm/respond \
 - `durationMs`
 - `usageNormalized` (`promptTokens`, `completionTokens`, `totalTokens`)
 - `costUsd` (estimated, if configured)
+
+## SDK Usage (TypeScript)
+
+```ts
+import { SovereignClient } from "@sovereign/client";
+
+const client = new SovereignClient({
+  baseUrl: "http://localhost:3001"
+});
+
+const run = await client.executeCompanyObjective({
+  workspaceId: "default",
+  objective: "Plan, execute, and verify launch readiness."
+});
+
+console.log(run);
+```
+
+## SDK Usage (Python)
+
+```python
+from sdk.python.sovereign_client import SovereignClient
+
+client = SovereignClient(base_url="http://localhost:3001")
+print(client.health())
+print(client.list_company_runs())
+```
 
 ## Plugin SDK
 

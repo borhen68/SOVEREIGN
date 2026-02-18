@@ -1173,6 +1173,29 @@ export class PrismaDataStore {
         };
     }
 
+    mapNotificationOutboxItem(item: any) {
+        return {
+            id: item.id,
+            workspaceId: item.workspaceId,
+            channelId: item.channelId,
+            chatId: item.chatId,
+            userId: item.userId,
+            text: item.text,
+            metadata: item.metadata,
+            status: item.status,
+            attempts: Number(item.attempts ?? 0),
+            maxAttempts: Number(item.maxAttempts ?? 0),
+            nextAttemptAt: toIso(item.nextAttemptAt),
+            lastAttemptAt: toIso(item.lastAttemptAt),
+            sentAt: toIso(item.sentAt),
+            lastError: item.lastError,
+            missionId: item.missionId,
+            runId: item.runId,
+            createdAt: toIso(item.createdAt),
+            updatedAt: toIso(item.updatedAt)
+        };
+    }
+
     mapWizardRun(w: any) {
         return {
             id: w.id,
@@ -1302,6 +1325,88 @@ export class PrismaDataStore {
             result: run.result,
             createdAt: toIso(run.createdAt)
         }));
+    }
+
+    async createNotificationOutboxItem(item: any) {
+        const created = await prisma.notificationOutbox.create({
+            data: {
+                id: item.id,
+                workspaceId: item.workspaceId ?? null,
+                channelId: item.channelId,
+                chatId: item.chatId,
+                userId: item.userId ?? null,
+                text: item.text,
+                metadata: item.metadata ?? undefined,
+                status: item.status,
+                attempts: Number(item.attempts ?? 0),
+                maxAttempts: Number(item.maxAttempts ?? 8),
+                nextAttemptAt: toDate(item.nextAttemptAt),
+                lastAttemptAt: toDate(item.lastAttemptAt),
+                sentAt: toDate(item.sentAt),
+                lastError: item.lastError ?? null,
+                missionId: item.missionId ?? null,
+                runId: item.runId ?? null,
+                createdAt: toDate(item.createdAt) || new Date(),
+                updatedAt: toDate(item.updatedAt) || new Date()
+            }
+        });
+        return this.mapNotificationOutboxItem(created);
+    }
+
+    async updateNotificationOutboxItem(itemId: string, partial: any) {
+        const data: any = { updatedAt: toDate(partial.updatedAt) || new Date() };
+        if (partial.status !== undefined) data.status = partial.status;
+        if (partial.attempts !== undefined) data.attempts = Number(partial.attempts);
+        if (partial.maxAttempts !== undefined) data.maxAttempts = Number(partial.maxAttempts);
+        if (partial.nextAttemptAt !== undefined) data.nextAttemptAt = toDate(partial.nextAttemptAt);
+        if (partial.lastAttemptAt !== undefined) data.lastAttemptAt = toDate(partial.lastAttemptAt);
+        if (partial.sentAt !== undefined) data.sentAt = toDate(partial.sentAt);
+        if (partial.lastError !== undefined) data.lastError = partial.lastError;
+        if (partial.metadata !== undefined) data.metadata = partial.metadata;
+        if (partial.text !== undefined) data.text = partial.text;
+        if (partial.channelId !== undefined) data.channelId = partial.channelId;
+        if (partial.chatId !== undefined) data.chatId = partial.chatId;
+        if (partial.userId !== undefined) data.userId = partial.userId;
+        if (partial.workspaceId !== undefined) data.workspaceId = partial.workspaceId;
+        if (partial.missionId !== undefined) data.missionId = partial.missionId;
+        if (partial.runId !== undefined) data.runId = partial.runId;
+
+        const updated = await prisma.notificationOutbox.update({
+            where: { id: itemId },
+            data
+        });
+        return this.mapNotificationOutboxItem(updated);
+    }
+
+    async getNotificationOutboxItemById(itemId: string) {
+        const item = await prisma.notificationOutbox.findUnique({
+            where: { id: itemId }
+        });
+        return item ? this.mapNotificationOutboxItem(item) : null;
+    }
+
+    async listNotificationOutboxItems(filters: any = {}) {
+        const where: any = {};
+        if (filters.workspaceId) where.workspaceId = filters.workspaceId;
+        if (filters.channelId) where.channelId = filters.channelId;
+        if (filters.missionId) where.missionId = filters.missionId;
+        if (filters.runId) where.runId = filters.runId;
+        if (filters.status) where.status = filters.status;
+        if (Array.isArray(filters.statuses) && filters.statuses.length > 0) {
+            where.status = { in: filters.statuses.map((status: unknown) => String(status)) };
+        }
+        const beforeRaw = filters.dueBefore ?? filters.before;
+        if (filters.dueOnly || beforeRaw) {
+            const before = toDate(beforeRaw) || new Date();
+            where.nextAttemptAt = { lte: before };
+        }
+        const safeLimit = Math.max(1, Number.isFinite(Number(filters.limit)) ? Number(filters.limit) : 200);
+        const items = await prisma.notificationOutbox.findMany({
+            where,
+            orderBy: [{ nextAttemptAt: "asc" }, { createdAt: "asc" }],
+            take: safeLimit
+        });
+        return items.map((item) => this.mapNotificationOutboxItem(item));
     }
 
     // --- Wizard ---

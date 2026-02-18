@@ -28,12 +28,14 @@ import { ObservabilityService } from "./services/observability-service.js";
 import { EvaluationService } from "./services/evaluation-service.js";
 import { CompanyOrchestratorService } from "./services/company-orchestrator-service.js";
 import { HeartbeatService } from "./services/heartbeat-service.js";
+import { NotificationOutboxService } from "./services/notification-outbox-service.js";
 import { SetupWizardService } from "./services/setup-wizard-service.js";
 import { DashboardService } from "./services/dashboard-service.js";
 import { jsonResponse, readJsonBody } from "./lib/http.js";
 import { initializeTracing } from "./lib/tracing-bootstrap.js";
 import { renderDashboardPage } from "./lib/dashboard-page.js";
 import { loadEnvFile } from "./lib/env-loader.js";
+import { buildOpenApiSpec } from "./lib/openapi-spec.js";
 
 loadEnvFile();
 initializeTracing().catch(() => { });
@@ -180,13 +182,27 @@ export function createApi(options = {}) {
   if (typeof runtimeTrustService.setChannelGatewayService === "function") {
     runtimeTrustService.setChannelGatewayService(channelGatewayService);
   }
+  const notificationOutboxService = new NotificationOutboxService({
+    store,
+    channelGatewayService,
+    observabilityService,
+    maxAttempts:
+      options.notificationOutboxMaxAttempts ?? process.env.NOTIFICATION_OUTBOX_MAX_ATTEMPTS,
+    batchSize: options.notificationOutboxBatchSize ?? process.env.NOTIFICATION_OUTBOX_BATCH_SIZE,
+    retryBaseMs:
+      options.notificationOutboxRetryBaseMs ?? process.env.NOTIFICATION_OUTBOX_RETRY_BASE_MS,
+    retryMaxMs: options.notificationOutboxRetryMaxMs ?? process.env.NOTIFICATION_OUTBOX_RETRY_MAX_MS
+  });
   const autopilotService = new AutopilotService({
     store,
     missionService,
     agentService,
     councilService,
     channelGatewayService,
+    observabilityService,
+    notificationOutboxService,
     pollIntervalMs: options.autopilotPollMs ?? process.env.AUTOPILOT_POLL_MS,
+    stepTimeoutMs: options.autopilotStepTimeoutMs ?? process.env.AUTOPILOT_STEP_TIMEOUT_MS,
     maxCyclesDefault: options.autopilotMaxCycles ?? process.env.AUTOPILOT_MAX_CYCLES,
     autoStart: options.autopilotAutoStart ?? process.env.AUTOPILOT_AUTO_START !== "false"
   });
@@ -236,13 +252,19 @@ export function createApi(options = {}) {
     channelGatewayService,
     securityFabricService,
     observabilityService,
-    evaluationService
+    evaluationService,
+    notificationOutboxService,
+    councilStepTimeoutMs:
+      options.companyCouncilStepTimeoutMs ?? process.env.COMPANY_COUNCIL_STEP_TIMEOUT_MS
   });
   const heartbeatService = new HeartbeatService({
     store,
     companyOrchestratorService,
     channelGatewayService,
     observabilityService,
+    notificationOutboxService,
+    outboxBatchLimit:
+      options.notificationOutboxBatchSize ?? process.env.NOTIFICATION_OUTBOX_BATCH_SIZE,
     tickMs: options.heartbeatTickMs ?? process.env.HEARTBEAT_TICK_MS,
     autoStart: options.heartbeatAutoStart ?? process.env.HEARTBEAT_AUTO_START !== "false"
   });
@@ -281,6 +303,15 @@ export function createApi(options = {}) {
           status: "ok",
           service: "sovereign-mvp-api"
         });
+      }
+
+      if (
+        method === "GET" &&
+        parts.length === 2 &&
+        parts[0] === "api" &&
+        (parts[1] === "openapi" || parts[1] === "openapi.json")
+      ) {
+        return jsonResponse(res, 200, buildOpenApiSpec(`${url.protocol}//${url.host}`));
       }
 
       if (method === "GET" && parts.length === 1 && parts[0] === "dashboard") {
@@ -467,6 +498,21 @@ export function createApi(options = {}) {
           const body = await readJsonBody(req);
           const evolution = await architectureService.evolveAgentSoul(body);
           return jsonResponse(res, 200, { evolution });
+        }
+        if (method === "GET" && parts.length === 5 && parts[2] === "soul" && parts[4] === "history") {
+          const history = await architectureService.listSoulHistory({
+            agentId: parts[3],
+            limit: Number(url.searchParams.get("limit") ?? 50)
+          });
+          return jsonResponse(res, 200, history);
+        }
+        if (method === "POST" && parts.length === 5 && parts[2] === "soul" && parts[4] === "rollback") {
+          const body = await readJsonBody(req);
+          const rollback = await architectureService.rollbackAgentSoul({
+            agentId: parts[3],
+            ...body
+          });
+          return jsonResponse(res, 200, rollback);
         }
       }
 
@@ -678,6 +724,27 @@ export function createApi(options = {}) {
         if (method === "GET" && parts.length === 3 && parts[2] === "jobs") {
           const jobs = await heartbeatService.listJobs(url.searchParams.get("workspaceId"));
           return jsonResponse(res, 200, { jobs });
+        }
+        if (method === "GET" && parts.length === 3 && parts[2] === "outbox") {
+          const items = await heartbeatService.listOutboxItems({
+            workspaceId: url.searchParams.get("workspaceId") ?? undefined,
+            status: url.searchParams.get("status") ?? undefined,
+            missionId: url.searchParams.get("missionId") ?? undefined,
+            runId: url.searchParams.get("runId") ?? undefined,
+            dueOnly:
+              ["1", "true", "yes"].includes(
+                String(url.searchParams.get("dueOnly") ?? "")
+                  .trim()
+                  .toLowerCase()
+              ),
+            limit: Number(url.searchParams.get("limit") ?? 200)
+          });
+          return jsonResponse(res, 200, { items });
+        }
+        if (method === "POST" && parts.length === 4 && parts[2] === "outbox" && parts[3] === "process") {
+          const body = await readJsonBody(req);
+          const result = await heartbeatService.runOutboxNow(Number(body.limit ?? 0));
+          return jsonResponse(res, 200, { result });
         }
         if (method === "POST" && parts.length === 3 && parts[2] === "jobs") {
           const body = await readJsonBody(req);
@@ -1097,6 +1164,7 @@ export function createApi(options = {}) {
     runtimeTrustService,
     autopilotService,
     heartbeatService,
+    notificationOutboxService,
     pluginService,
     channelGatewayService,
     architectureService,

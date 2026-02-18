@@ -30,6 +30,13 @@ export class HeartbeatService {
     this.companyOrchestratorService = options.companyOrchestratorService ?? null;
     this.channelGatewayService = options.channelGatewayService ?? null;
     this.observabilityService = options.observabilityService ?? null;
+    this.notificationOutboxService = options.notificationOutboxService ?? null;
+    this.outboxBatchLimit = clampInt(
+      options.outboxBatchLimit ?? process.env.NOTIFICATION_OUTBOX_BATCH_SIZE,
+      25,
+      1,
+      1000
+    );
     this.tickMs = clampInt(options.tickMs ?? process.env.HEARTBEAT_TICK_MS, 15000, 1000, 120000);
     this.autoStart = options.autoStart !== false;
     this.interval = null;
@@ -128,12 +135,55 @@ export class HeartbeatService {
     return this.#executeJob(job);
   }
 
+  async runOutboxNow(limit = this.outboxBatchLimit) {
+    if (
+      !this.notificationOutboxService ||
+      typeof this.notificationOutboxService.processDue !== "function"
+    ) {
+      return {
+        processed: 0,
+        sent: 0,
+        failed: 0,
+        requeued: 0
+      };
+    }
+    return this.notificationOutboxService.processDue({
+      limit: clampInt(limit, this.outboxBatchLimit, 1, 1000)
+    });
+  }
+
+  async listOutboxItems(filters = {}) {
+    if (
+      !this.notificationOutboxService ||
+      typeof this.notificationOutboxService.listItems !== "function"
+    ) {
+      return [];
+    }
+    return this.notificationOutboxService.listItems(filters);
+  }
+
   async runDueJobs() {
     if (this.running) {
       return;
     }
     this.running = true;
     try {
+      if (
+        this.notificationOutboxService &&
+        typeof this.notificationOutboxService.processDue === "function"
+      ) {
+        const outbox = await this.notificationOutboxService.processDue({
+          limit: this.outboxBatchLimit
+        });
+        if (Number(outbox?.processed ?? 0) > 0) {
+          this.#observe(
+            "heartbeat.outbox.processed",
+            "Processed notification outbox retries.",
+            outbox
+          );
+        }
+      }
+
       const now = Date.now();
       const allJobs = await this.store.listHeartbeatJobs();
       const jobs = allJobs

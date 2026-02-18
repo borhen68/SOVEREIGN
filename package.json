@@ -6,6 +6,7 @@
   "main": "dist/src/server.js",
   "scripts": {
     "build": "node scripts/build.mjs",
+    "openapi:export": "npm run build && node scripts/export-openapi.mjs",
     "dev": "npm run build && node --watch dist/src/server.js",
     "start": "npm run build && node dist/src/server.js",
     "worker": "npm run build && node dist/src/worker.js",

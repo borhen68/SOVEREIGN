@@ -366,6 +366,32 @@ model HeartbeatRun {
   @@map("heartbeat_runs")
 }
 
+model NotificationOutbox {
+  id              String   @id @default(uuid())
+  workspaceId     String?
+  channelId       String
+  chatId          String
+  userId          String?
+  text            String
+  metadata        Json?
+  status          String
+  attempts        Int      @default(0)
+  maxAttempts     Int      @default(8)
+  nextAttemptAt   DateTime?
+  lastAttemptAt   DateTime?
+  sentAt          DateTime?
+  lastError       String?
+  missionId       String?
+  runId           String?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([status, nextAttemptAt])
+  @@index([workspaceId, status])
+  @@map("notification_outbox")
+}
+
 model CompanyRun {
   id              String   @id @default(uuid())
   workspaceId     String?

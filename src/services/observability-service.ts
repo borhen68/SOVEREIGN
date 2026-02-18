@@ -261,6 +261,9 @@ export class ObservabilityService {
         if (filters.runId && event.runId !== safeString(filters.runId)) {
           return false;
         }
+        if (filters.missionId && event.missionId !== safeString(filters.missionId)) {
+          return false;
+        }
         if (filters.level && event.level !== safeString(filters.level).toLowerCase()) {
           return false;
         }
@@ -393,6 +396,8 @@ export class ObservabilityService {
   getMetrics(filters = {}) {
     const events = this.listEvents({
       workspaceId: filters.workspaceId,
+      runId: filters.runId,
+      missionId: filters.missionId,
       limit: clampInt(filters.limit, 2000, 1, 10000)
     });
     const bySource = {};
@@ -479,6 +484,37 @@ export class ObservabilityService {
         events: costEventCount,
         avgPerEvent: Number((totalCostUsd / Math.max(1, costEventCount)).toFixed(6))
       }
+    };
+  }
+
+  getUsage(filters = {}) {
+    const events = this.listEvents({
+      workspaceId: filters.workspaceId,
+      runId: filters.runId,
+      missionId: filters.missionId,
+      source: filters.source,
+      limit: clampInt(filters.limit, 5000, 1, 100000)
+    });
+    let costUsd = 0;
+    let tokenUsage = 0;
+    let costEventCount = 0;
+    let tokenEventCount = 0;
+    for (const event of events) {
+      if (Number.isFinite(Number(event.costUsd))) {
+        costUsd += Math.max(0, Number(event.costUsd));
+        costEventCount += 1;
+      }
+      if (Number.isFinite(Number(event.tokenUsage))) {
+        tokenUsage += Math.max(0, Number(event.tokenUsage));
+        tokenEventCount += 1;
+      }
+    }
+    return {
+      costUsd: Number(costUsd.toFixed(6)),
+      tokenUsage: Math.round(tokenUsage),
+      costEventCount,
+      tokenEventCount,
+      eventCount: events.length
     };
   }
 

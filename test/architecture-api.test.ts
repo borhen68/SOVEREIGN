@@ -89,4 +89,22 @@ test("architecture API exposes blueprint, company-plan, and soul evolution", asy
   });
   assert.equal(evolveRes.status, 200);
   assert.equal(evolveRes.body.evolution.agentAfter.id, planRes.body.plan.mainAgent.id);
+
+  const historyRes = await callApi(api.handler, {
+    method: "GET",
+    url: `/api/architecture/soul/${planRes.body.plan.mainAgent.id}/history?limit=10`
+  });
+  assert.equal(historyRes.status, 200);
+  assert.ok(Array.isArray(historyRes.body.history));
+  assert.ok(historyRes.body.history.length >= 2);
+
+  const rollbackRes = await callApi(api.handler, {
+    method: "POST",
+    url: `/api/architecture/soul/${planRes.body.plan.mainAgent.id}/rollback`,
+    body: {
+      targetVersion: 1
+    }
+  });
+  assert.equal(rollbackRes.status, 200);
+  assert.equal(rollbackRes.body.agentAfter.id, planRes.body.plan.mainAgent.id);
 });

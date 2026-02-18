@@ -33,6 +33,7 @@ const emptyState = () => ({
   memoryDocuments: [],
   heartbeatJobs: [],
   heartbeatRuns: [],
+  notificationOutbox: [],
   wizardRuns: [],
   companyRuns: [],
   observabilityEvents: []
@@ -796,6 +797,71 @@ export class DataStore {
     const safeLimit = Math.max(1, Number.isFinite(Number(filters.limit)) ? Number(filters.limit) : 200);
     const sliced = items.length > safeLimit ? items.slice(items.length - safeLimit) : items;
     return clone(sliced);
+  }
+
+  createNotificationOutboxItem(item) {
+    this.state.notificationOutbox.push(clone(item));
+    this.#saveState();
+    return clone(item);
+  }
+
+  updateNotificationOutboxItem(itemId, partial) {
+    const index = this.state.notificationOutbox.findIndex((item) => item.id === itemId);
+    if (index === -1) {
+      return null;
+    }
+    this.state.notificationOutbox[index] = {
+      ...this.state.notificationOutbox[index],
+      ...clone(partial)
+    };
+    this.#saveState();
+    return clone(this.state.notificationOutbox[index]);
+  }
+
+  getNotificationOutboxItemById(itemId) {
+    return clone(this.state.notificationOutbox.find((item) => item.id === itemId) ?? null);
+  }
+
+  listNotificationOutboxItems(filters = {}) {
+    let items = this.state.notificationOutbox;
+    if (filters.workspaceId) {
+      items = items.filter((item) => item.workspaceId === filters.workspaceId);
+    }
+    if (filters.channelId) {
+      items = items.filter((item) => item.channelId === filters.channelId);
+    }
+    if (filters.missionId) {
+      items = items.filter((item) => item.missionId === filters.missionId);
+    }
+    if (filters.runId) {
+      items = items.filter((item) => item.runId === filters.runId);
+    }
+    if (filters.status) {
+      items = items.filter((item) => item.status === filters.status);
+    }
+    if (Array.isArray(filters.statuses) && filters.statuses.length > 0) {
+      const allowed = new Set(filters.statuses.map((status) => String(status)));
+      items = items.filter((item) => allowed.has(String(item.status)));
+    }
+    const beforeRaw = filters.dueBefore ?? filters.before;
+    const dueOnly = Boolean(filters.dueOnly) || Boolean(beforeRaw);
+    if (dueOnly) {
+      const cutoff = Date.parse(String(beforeRaw ?? new Date().toISOString()));
+      items = items.filter((item) => {
+        const nextAttemptAt = Date.parse(item.nextAttemptAt ?? item.createdAt ?? "");
+        return Number.isFinite(nextAttemptAt) && nextAttemptAt <= cutoff;
+      });
+    }
+    const sorted = [...items].sort((a, b) => {
+      const aNext = Date.parse(a.nextAttemptAt ?? a.createdAt ?? 0);
+      const bNext = Date.parse(b.nextAttemptAt ?? b.createdAt ?? 0);
+      if (aNext !== bNext) {
+        return aNext - bNext;
+      }
+      return Date.parse(a.createdAt ?? 0) - Date.parse(b.createdAt ?? 0);
+    });
+    const safeLimit = Math.max(1, Number.isFinite(Number(filters.limit)) ? Number(filters.limit) : 200);
+    return clone(sorted.slice(0, safeLimit));
   }
 
   createWizardRun(run) {

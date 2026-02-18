@@ -107,3 +107,44 @@ test("architecture service evolves agent soul from outcomes", async () => {
   assert.ok(evolution.agentAfter.soul.values.includes("verification-first"));
   assert.ok(evolution.agentAfter.soul.values.includes("resilience"));
 });
+
+test("architecture service exposes soul history and rollback", async () => {
+  const { agentService, architectureService } = createStack();
+  const agent = await agentService.createAgent({
+    name: "Soul Test Agent",
+    role: "sub",
+    skills: ["planning"],
+    soul: {
+      mission: "Deliver clear plans.",
+      values: ["clarity"],
+      communicationStyle: "direct",
+      riskTolerance: "balanced"
+    }
+  });
+
+  await architectureService.evolveAgentSoul({
+    agentId: agent.id,
+    performanceScore: 0.3,
+    outcome: "Incident happened due to weak verification."
+  });
+  await architectureService.evolveAgentSoul({
+    agentId: agent.id,
+    performanceScore: 0.8,
+    outcome: "Execution was fast and clear for stakeholders."
+  });
+
+  const history = await architectureService.listSoulHistory({
+    agentId: agent.id,
+    limit: 20
+  });
+  assert.ok(Array.isArray(history.history));
+  assert.ok(history.history.length >= 3);
+
+  const rollback = await architectureService.rollbackAgentSoul({
+    agentId: agent.id,
+    targetVersion: 1
+  });
+  assert.equal(rollback.agentAfter.id, agent.id);
+  assert.ok(rollback.rollback.newVersion > rollback.rollback.fromVersion);
+  assert.equal(rollback.rollback.toVersion, 1);
+});

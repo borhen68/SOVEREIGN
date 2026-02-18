@@ -100,7 +100,15 @@ export class AutopilotService {
     this.maxCyclesDefault = clampInt(options.maxCyclesDefault, 12, 1, 100);
     this.maxFailures = clampInt(options.maxFailures, 4, 1, 20);
     this.retryDelayMs = clampInt(options.retryDelayMs, 15000, 1000, 300000);
+    this.stepTimeoutMs = clampInt(
+      options.stepTimeoutMs ?? process.env.AUTOPILOT_STEP_TIMEOUT_MS,
+      180000,
+      5000,
+      900000
+    );
     this.autoStart = options.autoStart !== false;
+    this.observabilityService = options.observabilityService ?? null;
+    this.notificationOutboxService = options.notificationOutboxService ?? null;
 
     this.interval = null;
     this.processing = false;
@@ -174,6 +182,7 @@ export class AutopilotService {
       mainAgentId: input.mainAgentId ? safeString(input.mainAgentId) : null,
       cycle: 0,
       maxCycles: clampInt(input.maxCycles, this.maxCyclesDefault, 1, 100),
+      budgetCap: Number.isFinite(Number(input.budgetCap)) ? Number(input.budgetCap) : null,
       failureCount: 0,
       allowWebResearch: input.allowWebResearch !== false,
       teamSize: clampInt(input.teamSize, 3, 1, 8),
@@ -271,6 +280,13 @@ export class AutopilotService {
       }
 
       const mission = await this.#ensureMission(current);
+      const budgetBlocked = await this.#enforceMissionBudget(current, mission, {
+        stage: "before_planning",
+        reasonPrefix: "Budget cap exceeded before planning."
+      });
+      if (budgetBlocked) {
+        return;
+      }
       const mainAgent = await this.#ensureMainAgent(current);
       if (!current.startedAt) {
         current = await this.store.updateAutopilotGoal(current.id, {
@@ -283,7 +299,7 @@ export class AutopilotService {
         const planning = await this.#setStatus(current.id, AutopilotStatus.PLANNING, {
           resumeStatus: AutopilotStatus.PLANNING
         });
-        const council = await this.councilService.runCouncil(mission.id, {
+        const council = await this.#runCouncilWithTimeout(mission.id, {
           problem: planning.objective,
           mainAgentId: mainAgent.id,
           allowWebResearch: planning.allowWebResearch,
@@ -345,7 +361,15 @@ export class AutopilotService {
       }
 
       await this.missionService.updateTaskStatus(mission.id, pending.id, "in_progress");
-      await this.councilService.runCouncil(mission.id, {
+      const executionBudgetBlocked = await this.#enforceMissionBudget(current, mission, {
+        stage: "before_task_execution",
+        reasonPrefix: "Budget cap exceeded before task execution."
+      });
+      if (executionBudgetBlocked) {
+        await this.missionService.updateTaskStatus(mission.id, pending.id, "failed");
+        return;
+      }
+      await this.#runCouncilWithTimeout(mission.id, {
         problem: `Execute this task: ${pending.title}`,
         mainAgentId: mainAgent.id,
         allowWebResearch: false,
@@ -407,6 +431,7 @@ export class AutopilotService {
       objective: goal.objective,
       kpi: "Goal completed without human intervention.",
       deadline: buildMissionDeadline(14),
+      budgetCap: Number.isFinite(Number(goal.budgetCap)) ? Number(goal.budgetCap) : null,
       policyPreset: goal.policyPreset || "balanced"
     });
     await this.store.updateAutopilotGoal(goal.id, {
@@ -509,8 +534,124 @@ export class AutopilotService {
           channelId: target.channelId,
           chatId: target.chatId
         });
+        if (
+          this.notificationOutboxService &&
+          typeof this.notificationOutboxService.enqueue === "function"
+        ) {
+          await this.notificationOutboxService.enqueue({
+            workspaceId: target.workspaceId ?? goal.workspaceId,
+            channelId: target.channelId,
+            chatId: target.chatId,
+            userId: target.userId ?? "autopilot",
+            text,
+            metadata: {
+              source: "autopilot.notify",
+              goalId: goal.id
+            },
+            missionId: goal.missionId ?? null
+          });
+        }
       }
     }
+  }
+
+  async #runCouncilWithTimeout(missionId, input) {
+    return await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const timeoutError = new Error(
+          `Autopilot council step timed out after ${this.stepTimeoutMs}ms (mission ${missionId}).`
+        );
+        timeoutError.statusCode = 504;
+        timeoutError.code = "STEP_TIMEOUT";
+        reject(timeoutError);
+      }, this.stepTimeoutMs);
+      Promise.resolve()
+        .then(() => this.councilService.runCouncil(missionId, input))
+        .then((value) => {
+          clearTimeout(timer);
+          resolve(value);
+        })
+        .catch((error) => {
+          clearTimeout(timer);
+          reject(error);
+        });
+    });
+  }
+
+  async #enforceMissionBudget(goal, mission, input = {}) {
+    const budgetCap = Number(mission?.budgetCap);
+    if (!Number.isFinite(budgetCap) || budgetCap <= 0) {
+      return false;
+    }
+    const usage = await this.#computeMissionUsage({
+      workspaceId: goal.workspaceId,
+      missionId: mission.id
+    });
+    if (usage.costUsd < budgetCap) {
+      return false;
+    }
+    const reason = `${safeString(input.reasonPrefix, "Budget cap exceeded.")} Spent ${usage.costUsd} / cap ${budgetCap} USD.`;
+    const paused = await this.#setStatus(goal.id, AutopilotStatus.PAUSED, {
+      blockedReason: reason,
+      summary: reason
+    });
+    await this.#log(paused.id, "budget.cap.exceeded", reason, {
+      stage: safeString(input.stage, "unknown"),
+      missionId: mission.id,
+      capUsd: Number(budgetCap.toFixed(6)),
+      spentUsd: usage.costUsd,
+      tokenUsage: usage.tokenUsage
+    });
+    await this.#notify(paused, `Autopilot paused: ${reason}`);
+    return true;
+  }
+
+  async #computeMissionUsage(input = {}) {
+    if (!this.observabilityService) {
+      return {
+        costUsd: 0,
+        tokenUsage: 0
+      };
+    }
+    if (typeof this.observabilityService.getUsage === "function") {
+      const usage = await this.observabilityService.getUsage({
+        workspaceId: safeString(input.workspaceId, "default"),
+        missionId: safeString(input.missionId),
+        source: "llm"
+      });
+      return {
+        costUsd: Number(Number(usage?.costUsd ?? 0).toFixed(6)),
+        tokenUsage: Math.max(0, Math.round(Number(usage?.tokenUsage ?? 0)))
+      };
+    }
+    if (typeof this.observabilityService.listEvents !== "function") {
+      return {
+        costUsd: 0,
+        tokenUsage: 0
+      };
+    }
+    const events = await Promise.resolve(
+      this.observabilityService.listEvents({
+        workspaceId: safeString(input.workspaceId, "default"),
+        missionId: safeString(input.missionId),
+        source: "llm",
+        limit: 50000
+      })
+    );
+    let costUsd = 0;
+    let tokenUsage = 0;
+    for (const event of events ?? []) {
+      if (Number.isFinite(Number(event?.costUsd))) {
+        costUsd += Math.max(0, Number(event.costUsd));
+      }
+      if (Number.isFinite(Number(event?.tokenUsage))) {
+        tokenUsage += Math.max(0, Number(event.tokenUsage));
+      }
+    }
+    return {
+      costUsd: Number(costUsd.toFixed(6)),
+      tokenUsage: Math.round(tokenUsage)
+    };
   }
 
   async #setStatus(goalId, status, patch = {}) {

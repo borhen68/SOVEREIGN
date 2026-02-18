@@ -513,9 +513,18 @@ export class ArchitectureService {
       nowIso()
     );
 
-    const updatedAgent = await this.agentService.updateAgent(agent.id, {
-      soul: nextSoul
-    });
+    const updatedAgent =
+      typeof this.agentService.applySoulMutation === "function"
+        ? await this.agentService.applySoulMutation(agent.id, {
+          soul: nextSoul,
+          source: "soul-evolution",
+          reason: "outcome-feedback",
+          outcome,
+          performanceScore
+        })
+        : await this.agentService.updateAgent(agent.id, {
+          soul: nextSoul
+        });
 
     return {
       agentBefore: {
@@ -536,6 +545,38 @@ export class ArchitectureService {
         communicationStyle: nextSoul.communicationStyle
       }
     };
+  }
+
+  async listSoulHistory(input = {}) {
+    const agentId = safeString(input.agentId);
+    if (!agentId) {
+      throw this.#badRequest("agentId is required.");
+    }
+    if (!this.agentService || typeof this.agentService.listSoulHistory !== "function") {
+      throw this.#badRequest("Soul history is not available.");
+    }
+    const history = await this.agentService.listSoulHistory(agentId, clampInt(input.limit, 50, 1, 500));
+    return {
+      agentId,
+      history,
+      currentVersion: history.length > 0 ? history[history.length - 1].version : null
+    };
+  }
+
+  async rollbackAgentSoul(input = {}) {
+    const agentId = safeString(input.agentId);
+    if (!agentId) {
+      throw this.#badRequest("agentId is required.");
+    }
+    if (!this.agentService || typeof this.agentService.rollbackSoul !== "function") {
+      throw this.#badRequest("Soul rollback is not available.");
+    }
+    return this.agentService.rollbackSoul(agentId, {
+      targetVersion: input.targetVersion,
+      reason: input.reason,
+      outcome: input.outcome,
+      performanceScore: input.performanceScore
+    });
   }
 
   async #resolveMainAgent(workspaceId, explicitMainAgentId) {
