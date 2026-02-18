@@ -1,5 +1,7 @@
 # SOVEREIGN MVP API
 
+![SOVEREIGN Architecture](./sovereign-architecture.png)
+
 Initial coding implementation from the SOVEREIGN PRD v1.1.
 
 This service provides:
