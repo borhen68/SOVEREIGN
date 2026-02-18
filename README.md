@@ -21,10 +21,13 @@ This service provides:
 ## Quick Start
 
 ```bash
+cp .env.example .env
 npm run start
 ```
 
 Server starts on `http://localhost:3001`.
+Local runtime commands (`start`, `worker`, `ui`) auto-load `./.env` by default.
+Shell env vars still win if already set.
 
 Run background autonomy loops in a second process:
 
@@ -117,6 +120,10 @@ The CLI lets you:
 - select or create an agent
 - assign/update that agent's model policy (`provider/model` with fallbacks)
 - chat locally with that selected agent
+- use a richer console UX with:
+  - session status panel (workspace, role, model, web access, soul values)
+  - command palette (`/help`, `/switch`, `/model`, `/who`, `/history`, `/clear`, `/exit`)
+  - structured chat cards and in-flight "agent is thinking" spinner
 
 ### Optional LLM Providers
 

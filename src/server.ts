@@ -33,7 +33,9 @@ import { DashboardService } from "./services/dashboard-service.js";
 import { jsonResponse, readJsonBody } from "./lib/http.js";
 import { initializeTracing } from "./lib/tracing-bootstrap.js";
 import { renderDashboardPage } from "./lib/dashboard-page.js";
+import { loadEnvFile } from "./lib/env-loader.js";
 
+loadEnvFile();
 initializeTracing().catch(() => { });
 
 function parsePath(pathname) {
