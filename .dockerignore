@@ -1,0 +1,12 @@
+.git
+.gitignore
+node_modules
+npm-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+.data
+.next
+openclaw-main 3
+coverage
+.DS_Store
+.env*

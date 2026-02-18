@@ -1,0 +1,11 @@
+{
+  "id": "hello-world",
+  "name": "Hello World Plugin",
+  "version": "0.1.0",
+  "description": "Example plugin that demonstrates custom tools.",
+  "entry": "index.js",
+  "permissions": {
+    "network": false,
+    "filesystem": false
+  }
+}

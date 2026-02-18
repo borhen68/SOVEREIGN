@@ -1,0 +1,74 @@
+services:
+  api:
+    build: .
+    container_name: sovereign-api
+    command: ["npm", "run", "start:prod"]
+    environment:
+      PORT: 3001
+      AUTOPILOT_AUTO_START: "false"
+      HEARTBEAT_AUTO_START: "false"
+      DEFAULT_WORKSPACE_ID: default
+      STATE_BACKEND: postgres_redis
+      DATABASE_URL: postgres://sovereign:sovereign@postgres:5432/sovereign
+      REDIS_URL: redis://redis:6379
+    env_file:
+      - .env
+    ports:
+      - "3001:3001"
+    volumes:
+      - sovereign_data:/app/.data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    restart: unless-stopped
+
+  worker:
+    build: .
+    container_name: sovereign-worker
+    command: ["npm", "run", "worker:prod"]
+    environment:
+      AUTOPILOT_AUTO_START: "true"
+      HEARTBEAT_AUTO_START: "true"
+      DEFAULT_WORKSPACE_ID: default
+      STATE_BACKEND: postgres_redis
+      DATABASE_URL: postgres://sovereign:sovereign@postgres:5432/sovereign
+      REDIS_URL: redis://redis:6379
+    env_file:
+      - .env
+    volumes:
+      - sovereign_data:/app/.data
+    depends_on:
+      api:
+        condition: service_started
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: sovereign-postgres
+    environment:
+      POSTGRES_DB: sovereign
+      POSTGRES_USER: sovereign
+      POSTGRES_PASSWORD: sovereign
+    ports:
+      - "5432:5432"
+    volumes:
+      - sovereign_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sovereign -d sovereign"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: sovereign-redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
+volumes:
+  sovereign_data:
+  sovereign_postgres:

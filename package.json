@@ -1,21 +1,29 @@
 {
-  "name": "codex",
+  "name": "sovereign-mvp",
   "version": "0.1.0",
-  "private": true,
+  "description": "SOVEREIGN v1 MVP API - mission contracts, runtime policy, approvals, and closure metrics.",
+  "type": "module",
+  "main": "dist/src/server.js",
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "eslint"
+    "build": "node scripts/build.mjs",
+    "dev": "npm run build && node --watch dist/src/server.js",
+    "start": "npm run build && node dist/src/server.js",
+    "worker": "npm run build && node dist/src/worker.js",
+    "start:prod": "node dist/src/server.js",
+    "worker:prod": "node dist/src/worker.js",
+    "ui": "npm run build && node dist/src/cli/local-ui.js",
+    "test": "npm run build && node --test dist/test/*.test.js",
+    "check": "npm run build && node --test dist/test/*.test.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@types/node": "^25.2.3",
+    "prisma": "^6.19.2"
   },
   "dependencies": {
-    "next": "16.1.6",
-    "react": "19.2.3",
-    "react-dom": "19.2.3"
-  },
-  "devDependencies": {
-    "babel-plugin-react-compiler": "1.0.0",
-    "eslint": "^9",
-    "eslint-config-next": "16.1.6"
+    "@prisma/client": "^6.19.2"
   }
 }

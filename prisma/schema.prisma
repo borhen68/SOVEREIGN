@@ -1,0 +1,418 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Core Entity: Mission
+model Mission {
+  id              String   @id @default(uuid())
+  title           String
+  goal            String
+  status          String   // draft, executing, completed, etc.
+  result          Json?
+  context         Json?
+  
+  tasks           Task[]
+  actions         Action[]
+  approvals       Approval[]
+  events          Event[]
+  evidences       Evidence[]
+  councilRuns     CouncilRun[]
+  councilSessions CouncilSession[]
+  runtimeActions  RuntimeAction[]
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@map("missions")
+}
+
+// Task Graph
+model Task {
+  id              String   @id @default(uuid())
+  missionId       String
+  mission         Mission  @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  
+  description     String
+  status          String   // pending, in_progress, done, failed
+  result          Json?
+  dependencies    String[] // Array of task IDs
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@index([missionId])
+  @@map("tasks")
+}
+
+// Runtime Action Log
+model Action {
+  id              String   @id @default(uuid())
+  missionId       String
+  mission         Mission  @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  
+  type            String   // read, write, external_send
+  description     String
+  toolName        String?
+  toolInput       Json?
+  toolOutput      Json?
+  
+  approvalId      String?  @unique
+  approval        Approval?
+  
+  createdAt       DateTime @default(now())
+  
+  @@index([missionId])
+  @@map("actions")
+}
+
+// Approvals
+model Approval {
+  id              String   @id @default(uuid())
+  missionId       String
+  mission         Mission  @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  
+  actionId        String   @unique
+  action          Action   @relation(fields: [actionId], references: [id], onDelete: Cascade)
+  
+  status          String   // requested, approved, rejected
+  decisionReason  String?
+  decisionTime    DateTime?
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@index([missionId])
+  @@map("approvals")
+}
+
+// Security & Audit
+model Event {
+  id              String   @id @default(uuid())
+  missionId       String?
+  mission         Mission? @relation(fields: [missionId], references: [id], onDelete: SetNull)
+  
+  type            String
+  payload         Json?
+  source          String?
+  
+  createdAt       DateTime @default(now())
+  
+  @@index([missionId])
+  @@map("events")
+}
+
+model Evidence {
+  id              String   @id @default(uuid())
+  missionId       String
+  mission         Mission  @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  
+  type            String
+  content         Json
+  source          String
+  confidence      Float?
+  
+  createdAt       DateTime @default(now())
+  
+  @@index([missionId])
+  @@map("evidences")
+}
+
+// Agents & Skills
+model Agent {
+  id              String   @id @default(uuid())
+  role            String   // main, sub
+  name            String
+  description     String?
+  workspaceId     String?
+  
+  skills          Skill[]
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@map("agents")
+}
+
+model Skill {
+  id              String   @id @default(uuid())
+  agentId         String
+  agent           Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  
+  name            String
+  description     String?
+  code            String?  // Actual implementation if dynamic?
+  memory          Json?    // Vector embeddings or localized context
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@index([agentId])
+  @@map("skills")
+}
+
+// Council & Governance
+// Council & Governance
+model CouncilRun {
+  id              String   @id @default(uuid())
+  missionId       String
+  mission         Mission  @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  workspaceId     String?
+  
+  problem         String
+  mainAgentId     String
+  subAgentIds     String[]
+  spawnedSubAgentIds String[]
+  teamAssembly    String
+  debateRounds    Int
+  autoSpawnSubAgents Boolean
+  autoGenerateSkills Boolean
+  
+  idempotencyKey       String?
+  idempotencySignature String?
+  
+  status          String
+  createdAt       DateTime @default(now())
+  startedAt       DateTime @default(now())
+  endedAt         DateTime?
+  
+  councilId       String?
+  error           String?
+  
+  // Legacy fields from initial schema attempt, kept for safety or mapped if needed
+  consensus       Boolean  @default(false) 
+  feedback        String?
+
+  @@index([missionId])
+  @@index([idempotencyKey])
+  @@map("council_runs")
+}
+
+model CouncilSession {
+  id              String   @id @default(uuid())
+  missionId       String
+  mission         Mission  @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  workspaceId     String?
+  runId           String
+  
+  status          String
+  problem         String
+  mainAgentId     String
+  subAgentIds     String[]
+  spawnedSubAgentIds String[]
+  allowWebResearch Boolean
+  teamAssembly    String
+  debateRounds    Int
+  autoSpawnSubAgents Boolean
+  autoGenerateSkills Boolean
+  idempotencyKey     String?
+
+  decomposition   Json
+  contributions   Json
+  discussion      Json
+  consensus       Json
+  finalBriefing   Json
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([missionId])
+  @@map("council_sessions")
+}
+
+// Autopilot & Background Jobs
+model AutopilotGoal {
+  id              String   @id @default(uuid())
+  objective       String
+  status          String
+  workspaceId     String?
+  
+  logs            AutopilotLog[]
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@map("autopilot_goals")
+}
+
+model AutopilotLog {
+  id              String   @id @default(uuid())
+  goalId          String
+  goal            AutopilotGoal @relation(fields: [goalId], references: [id], onDelete: Cascade)
+  
+  message         String
+  level           String?
+  
+  createdAt       DateTime @default(now())
+  
+  @@index([goalId])
+  @@map("autopilot_logs")
+}
+
+// Channels & Messages
+model ChannelSession {
+  id              String   @id @default(uuid())
+  workspaceId     String?
+  channelId       String
+  sessionKey      String   @unique // e.g., "telegram:123456"
+  
+  messages        ChannelMessage[]
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@map("channel_sessions")
+}
+
+model ChannelMessage {
+  id              String   @id @default(uuid())
+  sessionId       String
+  session         ChannelSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  
+  role            String   // user, assistant, system
+  content         String
+  metadata        Json?
+  
+  createdAt       DateTime @default(now())
+  
+  @@index([sessionId])
+  @@map("channel_messages")
+}
+
+// Runtime & Security Trust
+model RuntimeAction {
+  id              String   @id @default(uuid())
+  missionId       String?
+  mission         Mission? @relation(fields: [missionId], references: [id], onDelete: SetNull)
+  workspaceId     String?
+  
+  tool            String
+  input           Json?
+  riskScore       Float?
+  decision        String   // approved, blocked
+  
+  createdAt       DateTime @default(now())
+  
+  @@map("runtime_actions")
+}
+
+model SecurityPairing {
+  id              String   @id @default(uuid())
+  workspaceId     String?
+  channelId       String
+  secretKey       String? // hashed
+  
+  createdAt       DateTime @default(now())
+  
+  @@map("security_pairings")
+}
+
+model AuthToken {
+  id              String   @id @default(uuid())
+  token           String   @unique // hashed
+  workspaceId     String?
+  scopes          String[]
+  expiresAt       DateTime?
+  
+  createdAt       DateTime @default(now())
+  
+  @@map("auth_tokens")
+}
+
+model ObservabilityEvent {
+  id              String   @id @default(uuid())
+  workspaceId     String?
+  type            String
+  source          String
+  payload         Json?
+  traceId         String?
+  
+  createdAt       DateTime @default(now())
+  
+  @@map("observability_events")
+}
+
+// Other specialized models from DataStore
+model HeartbeatJob {
+  id              String   @id @default(uuid())
+  workspaceId     String?
+  schedule        String   // cron
+  task            String
+  active          Boolean  @default(true)
+  
+  runs            HeartbeatRun[]
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@map("heartbeat_jobs")
+}
+
+model HeartbeatRun {
+  id              String   @id @default(uuid())
+  jobId           String
+  job             HeartbeatJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  
+  status          String
+  result          Json?
+  
+  createdAt       DateTime @default(now())
+  
+  @@index([jobId])
+  @@map("heartbeat_runs")
+}
+
+model CompanyRun {
+  id              String   @id @default(uuid())
+  workspaceId     String?
+  objective       String
+  status          String
+  result          Json?
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@map("company_runs")
+}
+
+model WizardRun {
+  id              String   @id @default(uuid())
+  workspaceId     String?
+  status          String
+  step            String
+  data            Json?
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@map("wizard_runs")
+}
+
+model TunnelProfile {
+  id              String   @id @default(uuid())
+  workspaceId     String?
+  provider        String
+  url             String
+  active          Boolean  @default(false)
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@map("tunnel_profiles")
+}
+
+model MemoryDocument {
+  id              String   @id @default(uuid())
+  workspaceId     String?
+  content         String
+  embedding       Json?    // Vector
+  metadata        Json?
+  
+  createdAt       DateTime @default(now())
+  
+  @@map("memory_documents")
+}
