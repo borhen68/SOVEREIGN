@@ -1,39 +1,101 @@
-# SOVEREIGN MVP API
+# SOVEREIGN
 
 ![SOVEREIGN Architecture](./sovereign-architecture.png)
 
-Initial coding implementation from the SOVEREIGN PRD v1.1.
+SOVEREIGN is an autonomous agent runtime for real work, with execution safety by default.
 
-This service provides:
-- Mission contracts (`goal + KPI + deadline + policy`)
-- Task tracking with closure metrics
-- Runtime risk scoring with approval gates
-- Runtime human checkpoints during execution with resume-from-checkpoint state
-- Action timeline and evidence logging
-- Basic truth verification endpoint
-- Multi-agent councils (agents with souls + skills collaborating under a main agent)
-- Lane-aware command queue for safe concurrent runs
-- Company orchestrator (`objective -> plan -> execute -> verify -> notify`)
-- Security fabric (pairing, auth gate, rate/cost cap, sandbox path checks, encrypted local secrets)
-- Hybrid memory engine (vector + keyword + graph entities/relations)
-- Tunnel manager, heartbeat cron jobs, setup wizard, observability traces, evals, and telemetry metrics
+Human sets objective once.
+Agent company plans, debates, executes, verifies, and reports done.
 
-## Quick Start
+## Why SOVEREIGN
+
+- Multi-agent company loop: `objective -> plan -> execute -> verify -> notify`
+- Runtime guardrails: risk scoring, approvals, and pause/resume checkpoints
+- Reliability controls: budget circuit breakers, council timeouts, durable notification outbox retries
+- Learning without drift: soul version history and rollback
+- Open integrations: OpenAPI spec + TypeScript/Python clients
+
+## Start In 60 Seconds
 
 ```bash
 cp .env.example .env
 npm run start
 ```
 
-Server starts on `http://localhost:3001`.
-Local runtime commands (`start`, `worker`, `ui`) auto-load `./.env` by default.
-Shell env vars still win if already set.
-
-Run background autonomy loops in a second process:
+In a second terminal:
 
 ```bash
 npm run worker
 ```
+
+Then open:
+
+- `http://localhost:3001/health`
+- `http://localhost:3001/dashboard`
+- `http://localhost:3001/api/openapi`
+
+## 30-Second Demo (copy/paste)
+
+```bash
+curl -X POST http://localhost:3001/api/company/execute \
+  -H "Content-Type: application/json" \
+  -d '{
+    "workspaceId": "default",
+    "objective": "Plan launch, ship reliability fixes, and notify me when done."
+  }'
+```
+
+Then:
+
+```bash
+curl http://localhost:3001/api/company/runs
+```
+
+## Documentation Map
+
+- Quick start: `docs/start/getting-started.md`
+- Demo flows: `docs/start/showcase.md`
+- Security model: `docs/core/security.md`
+- Architecture: `docs/core/architecture.md`
+- API and SDK reference: `docs/reference/api.md`
+
+## OpenAPI + SDK
+
+- OpenAPI endpoints:
+  - `GET /api/openapi`
+  - `GET /api/openapi.json`
+- Export artifact:
+  - `npm run openapi:export` -> `openapi.json`
+- TypeScript SDK:
+  - runtime client: `src/sdk/sovereign-client.ts`
+  - publishable package: `sdk/ts` (`@sovereign/client`)
+- Python starter client:
+  - `sdk/python/sovereign_client.py`
+
+## Provider and Data Modes
+
+SOVEREIGN supports local and cloud model providers.
+Choose mode by provider configuration in `.env`.
+
+- Local-heavy mode:
+  - set `OLLAMA_BASE_URL` and `OLLAMA_MODEL`
+  - avoid external provider keys
+- Hybrid mode:
+  - local for low-risk tasks, cloud for high-reasoning tasks
+- Cloud mode:
+  - OpenAI/Anthropic/Gemini/OpenRouter/etc.
+
+## Current Status
+
+- Build: `npm run build` passes
+- Tests: `npm test` passes
+- API coverage: OpenAPI exposed and exported
+- Reliability features shipped:
+  - runtime HITL checkpoints
+  - mission budget cap enforcement
+  - council step timeout controls
+  - durable notification outbox and retries
+  - soul history and rollback
 
 ## Docker Quick Start (API + Worker + Postgres + Redis)
 
@@ -43,188 +105,41 @@ docker compose up --build
 ```
 
 Then open:
+
 - `http://localhost:3001/health`
 - `http://localhost:3001/dashboard`
-- `http://localhost:3001/api/architecture/blueprint`
-- `http://localhost:3001/api/company/runs`
+- `http://localhost:3001/api/openapi`
 
-## Recent Updates (V1.1+)
-
-### 1) Hybrid GraphRAG Memory
-- Memory chunks now store:
-  - concepts
-  - entities
-  - typed relations
-- Search scoring now uses:
-  - vector similarity
-  - keyword relevance
-  - concept overlap
-  - entity overlap
-  - relation-type overlap
-- Graph APIs return enriched nodes/edges with shared entities + relation types.
-
-### 2) Runtime HITL Checkpoints (not only pre-execution)
-- Company runs can pause mid-execution when:
-  - a workstream is high-risk
-  - consensus after council is below threshold
-- Resume continues from saved checkpoint with:
-  - `nextWorkstreamIndex`
-  - prior `executionResults`
-  - persisted runtime escalation policy
-
-Useful execution flags (body fields on `POST /api/company/execute` or resume):
-- `runtimeEscalationEnabled` (default `true`)
-- `runtimePauseOnHighRiskStream` (default `true`)
-- `runtimePauseOnLowConsensus` (default `true`)
-- `runtimeLowConsensusThreshold` (default `0.6`)
-- `runtimeRiskHints` (optional extra risk keywords)
-
-### 3) Deep Observability + Eval Telemetry
-- LLM telemetry now records:
-  - request/attempt start, success, failure
-  - latency
-  - token usage
-  - estimated cost
-- Plugin tool telemetry now records:
-  - invocation start/success/failure/blocked
-  - duration and risk metadata
-- Metrics endpoint now includes:
-  - latency distribution (`avg`, `p50`, `p95`, `max`)
-  - token usage totals
-  - cost totals
-  - per-source usage breakdown
-
-### 4) Async Core Refactor + Prisma Stabilization (Feb 2026)
-- Core mission/council/skill/autopilot flows were aligned to async I/O end-to-end.
-- Service call-sites and tests were updated to await async datastore methods consistently.
-- Prisma client/schema sync issues were resolved (`npx prisma generate` + datastore method alignment).
-- Current project verification:
-  - `npm run build` passes
-  - `npm test` passes
-
-### 5) Production Hardening Pass
-- CI syntax step now validates built runtime files (`dist/src/server.js`, `dist/src/worker.js`).
-- State backend now fails fast on startup if required adapters are missing:
-  - postgres mode requires `pg`
-  - redis modes require `redis`
-- Prisma datastore no longer leaves channel/runtime/security/memory methods as empty stubs.
-- Backend adapters (`pg`, `redis`) are now first-class npm dependencies for reliable local, CI, and Docker runs.
-
-### 6) Budget, Timeout, and Durable Delivery Guards
-- Mission budget cap circuit breaker is now enforced in execution loops:
-  - company orchestrator checks budget before each workstream
-  - autopilot checks budget before planning and before task execution
-- Council execution now has configurable step timeout guards:
-  - `COMPANY_COUNCIL_STEP_TIMEOUT_MS`
-  - `AUTOPILOT_STEP_TIMEOUT_MS`
-- Notification delivery is now durable:
-  - failed sends are queued in a persistent outbox
-  - heartbeat tick retries pending outbox items with exponential backoff
-  - outbox works with file store and Prisma/Postgres store
-
-### 7) Soul Versioning + Rollback
-- Agents now persist soul version history with metadata (`reason`, `source`, `outcome`, `performanceScore`).
-- Soul evolution appends immutable versions instead of mutating in place only.
-- Rollback creates a new version that restores a prior soul snapshot.
-- New APIs:
-  - `GET /api/architecture/soul/:agentId/history`
-  - `POST /api/architecture/soul/:agentId/rollback`
-
-### 8) OpenAPI + Typed SDK
-- OpenAPI spec is now available at:
-  - `GET /api/openapi`
-  - `GET /api/openapi.json`
-- Exported artifact can be generated at repo root:
-  - `npm run openapi:export` -> `openapi.json`
-- Typed TypeScript SDK available at:
-  - `src/sdk/sovereign-client.ts`
-  - publishable package layout: `sdk/ts` (`@sovereign/client`)
-- Python client starter available at:
-  - `sdk/python/sovereign_client.py`
-
-### Local CLI UI (agent select + model select + chat)
+## Local CLI UI
 
 ```bash
 npm run ui
 ```
 
-The CLI lets you:
-- select or create an agent
-- assign/update that agent's model policy (`provider/model` with fallbacks)
-- chat locally with that selected agent
-- use a richer console UX with:
-  - session status panel (workspace, role, model, web access, soul values)
-  - command palette (`/help`, `/switch`, `/model`, `/who`, `/history`, `/clear`, `/exit`)
-  - structured chat cards and in-flight "agent is thinking" spinner
+The CLI supports agent selection/creation, model policy updates, and local chat.
 
-### Optional LLM Providers
+## Environment Quick Reference
 
-Set any provider keys you want to use:
+Set any model providers you want:
 
 ```bash
 export OPENAI_API_KEY="..."
 export ANTHROPIC_API_KEY="..."
-export GEMINI_API_KEY="..."   # or GOOGLE_API_KEY
+export GEMINI_API_KEY="..."
 ```
 
-SOVEREIGN also supports 22+ OpenAI-compatible providers (OpenRouter, Groq, Mistral, Together, Fireworks, DeepSeek, xAI, Perplexity, Venice, Cohere, Ollama, custom URL, and more). Configure them via `.env` variables in `.env.example`.
-
-### State Backend Switch (File / Postgres / Postgres+Redis)
-
-Use environment variables:
+State backend switch:
 
 ```bash
 export STATE_BACKEND="file"               # file | postgres | postgres_redis
 export DATABASE_URL="postgres://user:pass@host:5432/db"
 export REDIS_URL="redis://host:6379"
-export STATE_BACKEND_TABLE="sovereign_state"
-export STATE_BACKEND_KEY="default"
 ```
 
-When using `STATE_BACKEND=postgres` or `postgres_redis`, install adapter packages:
-
-```bash
-npm install pg redis
-```
-
-Important mode behavior:
-- `STATE_BACKEND=postgres`: uses `PrismaDataStore` (relational persistence through Prisma models).
-- `STATE_BACKEND=postgres_redis`: uses `DataStore` + `StateBackendService` snapshot persistence (Postgres/Redis adapter), not direct Prisma row-level store.
-
-After any Prisma schema change, regenerate the client:
+After Prisma schema changes:
 
 ```bash
 npx prisma generate
-```
-
-Runtime status:
-
-```bash
-curl http://localhost:3001/api/system/persistence
-```
-
-Optional model overrides:
-
-```bash
-export OPENAI_MODEL="gpt-4o-mini"
-export ANTHROPIC_MODEL="claude-3-5-sonnet-latest"
-export GEMINI_MODEL="gemini-1.5-pro"
-```
-
-Task-aware routing overrides (optional):
-
-```bash
-export TASK_MODEL_SMALL="openai/gpt-4o-mini"
-export TASK_MODEL_STANDARD="anthropic/claude-3-5-sonnet-latest"
-export TASK_MODEL_HIGH_CODING="anthropic/claude-opus-4-6"
-export TASK_MODEL_HIGH_GENERAL="gemini/gemini-2.5-pro"
-```
-
-Optional chat model routing (OpenClaw-style model refs):
-
-```bash
-export CHAT_MODEL_PRIMARY="openai/gpt-4o-mini"
-export CHAT_MODEL_FALLBACKS="anthropic/claude-3-5-sonnet-latest,gemini/gemini-1.5-pro"
 ```
 
 ## API Endpoints
