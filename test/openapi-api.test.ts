@@ -57,4 +57,9 @@ test("openapi endpoint returns discoverable api spec", async () => {
   assert.ok(response.body.paths["/api/company/execute"]);
   assert.ok(response.body.paths["/api/architecture/soul/{agentId}/rollback"]);
   assert.ok(response.body.paths["/api/heartbeat/outbox/process"]);
+  assert.ok(response.body.paths["/api/gateway/status"]);
+  assert.ok(response.body.paths["/api/gateway/bridge/status"]);
+  assert.ok(response.body.paths["/api/gateway/bridge/nodes"]);
+  assert.ok(response.body.paths["/api/gateway/nodes/{nodeId}/invoke"]);
+  assert.ok(response.body.paths["/api/gateway/tailscale/plan"]);
 });

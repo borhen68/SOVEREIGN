@@ -113,6 +113,78 @@ export class SovereignClient {
     return this.request("GET", "/api/system/persistence");
   }
 
+  async getGatewayStatus() {
+    return this.request("GET", "/api/gateway/status");
+  }
+
+  async getGatewayWsInfo() {
+    return this.request("GET", "/api/gateway/ws-info");
+  }
+
+  async getGatewayBridgeStatus() {
+    return this.request("GET", "/api/gateway/bridge/status");
+  }
+
+  async getGatewayBridgeWsInfo() {
+    return this.request("GET", "/api/gateway/bridge/ws-info");
+  }
+
+  async listGatewayBridgeNodes() {
+    return this.request("GET", "/api/gateway/bridge/nodes");
+  }
+
+  async listGatewayNodes() {
+    return this.request("GET", "/api/gateway/nodes");
+  }
+
+  async registerGatewayNode(body: any) {
+    return this.request("POST", "/api/gateway/nodes/register", { body });
+  }
+
+  async getGatewayNode(nodeId: string) {
+    return this.request("GET", `/api/gateway/nodes/${encodeURIComponent(nodeId)}`);
+  }
+
+  async invokeGatewayNode(nodeId: string, body: any) {
+    return this.request("POST", `/api/gateway/nodes/${encodeURIComponent(nodeId)}/invoke`, { body });
+  }
+
+  async getGatewayBrowserStatus() {
+    return this.request("GET", "/api/gateway/browser/status");
+  }
+
+  async startGatewayBrowser() {
+    return this.request("POST", "/api/gateway/browser/start");
+  }
+
+  async stopGatewayBrowser() {
+    return this.request("POST", "/api/gateway/browser/stop");
+  }
+
+  async listGatewayBrowserTargets() {
+    return this.request("GET", "/api/gateway/browser/targets");
+  }
+
+  async openGatewayBrowser(body: any) {
+    return this.request("POST", "/api/gateway/browser/open", { body });
+  }
+
+  async runGatewayBrowserCdp(body: any) {
+    return this.request("POST", "/api/gateway/browser/cdp", { body });
+  }
+
+  async getGatewayTailscaleStatus() {
+    return this.request("GET", "/api/gateway/tailscale/status");
+  }
+
+  async planGatewayTailscale(body: any = {}) {
+    return this.request("POST", "/api/gateway/tailscale/plan", { body });
+  }
+
+  async applyGatewayTailscale(body: any = {}) {
+    return this.request("POST", "/api/gateway/tailscale/apply", { body });
+  }
+
   async listLlmProviders() {
     return this.request("GET", "/api/llm/providers");
   }

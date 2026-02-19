@@ -31,6 +31,11 @@ import { HeartbeatService } from "./services/heartbeat-service.js";
 import { NotificationOutboxService } from "./services/notification-outbox-service.js";
 import { SetupWizardService } from "./services/setup-wizard-service.js";
 import { DashboardService } from "./services/dashboard-service.js";
+import { BrowserControlService } from "./services/browser-control-service.js";
+import { NodeService } from "./services/node-service.js";
+import { TailscaleExposureService } from "./services/tailscale-exposure-service.js";
+import { GatewayWebsocketService } from "./services/gateway-websocket-service.js";
+import { DeviceBridgeService } from "./services/device-bridge-service.js";
 import { jsonResponse, readJsonBody } from "./lib/http.js";
 import { initializeTracing } from "./lib/tracing-bootstrap.js";
 import { renderDashboardPage } from "./lib/dashboard-page.js";
@@ -178,6 +183,51 @@ export function createApi(options = {}) {
     whatsappAccessToken: options.whatsappAccessToken ?? process.env.WHATSAPP_ACCESS_TOKEN,
     whatsappVerifyToken: options.whatsappVerifyToken ?? process.env.WHATSAPP_VERIFY_TOKEN,
     whatsappPhoneNumberId: options.whatsappPhoneNumberId ?? process.env.WHATSAPP_PHONE_NUMBER_ID
+  });
+  const browserControlService = new BrowserControlService({
+    cwd,
+    enabled: options.browserControlEnabled ?? process.env.BROWSER_CONTROL_ENABLED !== "false",
+    debuggingPort: options.browserCdpPort ?? process.env.BROWSER_CDP_PORT,
+    headless: options.browserHeadless ?? process.env.BROWSER_HEADLESS === "true",
+    allowedDomains: options.browserAllowlistDomains ?? process.env.BROWSER_ALLOWLIST_DOMAINS,
+    binaryPath: options.browserChromePath ?? process.env.BROWSER_CHROME_PATH,
+    profileDir: options.browserProfileDir ?? process.env.BROWSER_PROFILE_DIR
+  });
+  const nodeService = new NodeService({
+    browserControlService,
+    enableSystemRun: options.nodeSystemRunEnabled ?? process.env.NODE_SYSTEM_RUN_ENABLED === "true",
+    enableShellCommand:
+      options.nodeSystemShellEnabled ?? process.env.NODE_SYSTEM_SHELL_ENABLED === "true",
+    commandAllowlist: options.nodeSystemRunAllowlist ?? process.env.NODE_SYSTEM_RUN_ALLOWLIST
+  });
+  const deviceBridgeService = new DeviceBridgeService({
+    path: options.deviceBridgePath ?? process.env.DEVICE_BRIDGE_PATH,
+    authToken: options.deviceBridgeToken ?? process.env.DEVICE_BRIDGE_TOKEN,
+    nodeService,
+    observabilityService,
+    invokeTimeoutMs:
+      options.deviceBridgeInvokeTimeoutMs ?? process.env.DEVICE_BRIDGE_INVOKE_TIMEOUT_MS
+  });
+  nodeService.setRemoteInvoker((input) => deviceBridgeService.invokeNode(input));
+  const tailscaleExposureService = new TailscaleExposureService({
+    gatewayBind: options.gatewayBind ?? process.env.GATEWAY_BIND ?? "0.0.0.0",
+    gatewayPort: options.port ?? process.env.PORT ?? 3001,
+    mode: options.gatewayTailscaleMode ?? process.env.GATEWAY_TAILSCALE_MODE,
+    authMode: options.gatewayAuthMode ?? process.env.GATEWAY_AUTH_MODE,
+    allowTailscaleHeaders:
+      options.gatewayAuthAllowTailscale ?? process.env.GATEWAY_AUTH_ALLOW_TAILSCALE,
+    resetOnExit: options.gatewayTailscaleResetOnExit ?? process.env.GATEWAY_TAILSCALE_RESET_ON_EXIT,
+    automationEnabled:
+      options.gatewayTailscaleAutomation ?? process.env.GATEWAY_TAILSCALE_AUTOMATION
+  });
+  const gatewayWebsocketService = new GatewayWebsocketService({
+    channelGatewayService,
+    nodeService,
+    deviceBridgeService,
+    browserControlService,
+    tailscaleExposureService,
+    observabilityService,
+    path: options.gatewayWsPath ?? process.env.GATEWAY_WS_PATH
   });
   if (typeof runtimeTrustService.setChannelGatewayService === "function") {
     runtimeTrustService.setChannelGatewayService(channelGatewayService);
@@ -355,6 +405,125 @@ export function createApi(options = {}) {
             store: typeof store.getPersistenceStatus === "function" ? store.getPersistenceStatus() : { type: "prisma" },
             backend: backendStatus
           });
+        }
+      }
+
+      if (parts.length >= 3 && parts[0] === "api" && parts[1] === "gateway") {
+        if (method === "GET" && parts.length === 3 && parts[2] === "status") {
+          return jsonResponse(res, 200, {
+            gateway: gatewayWebsocketService.getStatus(),
+            ws: gatewayWebsocketService.getWsInfo({
+              host: req.headers.host ?? "localhost:3001",
+              protocol: url.protocol
+            }),
+            bridge: deviceBridgeService.getStatus(),
+            bridgeWs: deviceBridgeService.getWsInfo({
+              host: req.headers.host ?? "localhost:3001",
+              protocol: url.protocol
+            }),
+            browser: browserControlService.getStatus(),
+            tailscale: tailscaleExposureService.getStatus()
+          });
+        }
+        if (method === "GET" && parts.length === 3 && parts[2] === "ws-info") {
+          return jsonResponse(res, 200, gatewayWebsocketService.getWsInfo({
+            host: req.headers.host ?? "localhost:3001",
+            protocol: url.protocol
+          }));
+        }
+        if (parts.length >= 4 && parts[2] === "bridge") {
+          if (method === "GET" && parts.length === 4 && parts[3] === "status") {
+            return jsonResponse(res, 200, {
+              bridge: deviceBridgeService.getStatus()
+            });
+          }
+          if (method === "GET" && parts.length === 4 && parts[3] === "ws-info") {
+            return jsonResponse(res, 200, deviceBridgeService.getWsInfo({
+              host: req.headers.host ?? "localhost:3001",
+              protocol: url.protocol
+            }));
+          }
+          if (method === "GET" && parts.length === 4 && parts[3] === "nodes") {
+            return jsonResponse(res, 200, {
+              nodes: deviceBridgeService.listConnectedNodes()
+            });
+          }
+        }
+        if (method === "GET" && parts.length === 3 && parts[2] === "nodes") {
+          return jsonResponse(res, 200, {
+            nodes: nodeService.listNodes()
+          });
+        }
+        if (method === "POST" && parts.length === 4 && parts[2] === "nodes" && parts[3] === "register") {
+          const body = await readJsonBody(req);
+          const node = nodeService.registerNode(body);
+          return jsonResponse(res, 201, { node });
+        }
+        if (method === "GET" && parts.length === 4 && parts[2] === "nodes") {
+          const node = nodeService.describeNode(parts[3]);
+          if (!node) {
+            return jsonResponse(res, 404, { error: "Node not found." });
+          }
+          return jsonResponse(res, 200, { node });
+        }
+        if (method === "POST" && parts.length === 5 && parts[2] === "nodes" && parts[4] === "invoke") {
+          const body = await readJsonBody(req);
+          const invocation = await nodeService.invoke({
+            nodeId: parts[3],
+            action: body.action,
+            input: body.input
+          });
+          gatewayWebsocketService.broadcast("node.invoked", {
+            nodeId: parts[3],
+            action: body.action
+          });
+          return jsonResponse(res, 200, { invocation });
+        }
+        if (parts.length >= 4 && parts[2] === "browser") {
+          if (method === "GET" && parts.length === 4 && parts[3] === "status") {
+            return jsonResponse(res, 200, { browser: browserControlService.getStatus() });
+          }
+          if (method === "POST" && parts.length === 4 && parts[3] === "start") {
+            const browser = await browserControlService.start();
+            return jsonResponse(res, 200, { browser });
+          }
+          if (method === "POST" && parts.length === 4 && parts[3] === "stop") {
+            const browser = await browserControlService.stop();
+            return jsonResponse(res, 200, { browser });
+          }
+          if (method === "GET" && parts.length === 4 && parts[3] === "targets") {
+            const targets = await browserControlService.listTargets();
+            return jsonResponse(res, 200, { targets });
+          }
+          if (method === "POST" && parts.length === 4 && parts[3] === "open") {
+            const body = await readJsonBody(req);
+            const target = await browserControlService.openUrl({
+              url: body.url
+            });
+            return jsonResponse(res, 200, { target });
+          }
+          if (method === "POST" && parts.length === 4 && parts[3] === "cdp") {
+            const body = await readJsonBody(req);
+            const result = await browserControlService.runCdpCommand(body);
+            return jsonResponse(res, 200, { result });
+          }
+        }
+        if (parts.length >= 4 && parts[2] === "tailscale") {
+          if (method === "GET" && parts.length === 4 && parts[3] === "status") {
+            return jsonResponse(res, 200, {
+              tailscale: tailscaleExposureService.getStatus()
+            });
+          }
+          if (method === "POST" && parts.length === 4 && parts[3] === "plan") {
+            const body = await readJsonBody(req);
+            const plan = tailscaleExposureService.plan(body);
+            return jsonResponse(res, 200, { plan });
+          }
+          if (method === "POST" && parts.length === 4 && parts[3] === "apply") {
+            const body = await readJsonBody(req);
+            const result = await tailscaleExposureService.apply(body);
+            return jsonResponse(res, 200, result);
+          }
         }
       }
 
@@ -1178,15 +1347,49 @@ export function createApi(options = {}) {
     companyOrchestratorService,
     setupWizardService,
     dashboardService,
+    browserControlService,
+    nodeService,
+    deviceBridgeService,
+    tailscaleExposureService,
+    gatewayWebsocketService,
     store
   };
 }
 
 export function startServer(options = {}) {
   const port = Number(options.port ?? process.env.PORT ?? 3001);
+  const bind = options.gatewayBind ?? process.env.GATEWAY_BIND ?? undefined;
   const api = createApi(options);
   const server = http.createServer(api.handler);
+  server.on("upgrade", (req, socket, head) => {
+    const handledGateway =
+      api.gatewayWebsocketService &&
+      typeof api.gatewayWebsocketService.handleUpgrade === "function"
+        ? api.gatewayWebsocketService.handleUpgrade(req, socket, head)
+        : false;
+    const handledBridge =
+      !handledGateway &&
+      api.deviceBridgeService &&
+      typeof api.deviceBridgeService.handleUpgrade === "function"
+        ? api.deviceBridgeService.handleUpgrade(req, socket, head)
+        : false;
+    if (!handledGateway && !handledBridge) {
+      socket.destroy();
+    }
+  });
   server.on("close", () => {
+    if (api.gatewayWebsocketService && typeof api.gatewayWebsocketService.shutdown === "function") {
+      api.gatewayWebsocketService.shutdown();
+    }
+    if (api.browserControlService && typeof api.browserControlService.stop === "function") {
+      api.browserControlService.stop().catch?.(() => { });
+    }
+    if (api.deviceBridgeService && typeof api.deviceBridgeService.shutdown === "function") {
+      api.deviceBridgeService.shutdown();
+    }
+    if (api.tailscaleExposureService && typeof api.tailscaleExposureService.shutdown === "function") {
+      api.tailscaleExposureService.shutdown().catch?.(() => { });
+    }
     if (api.autopilotService && typeof api.autopilotService.stop === "function") {
       api.autopilotService.stop();
     }
@@ -1202,7 +1405,11 @@ export function startServer(options = {}) {
       api.stateBackendService.close().catch(() => { });
     }
   });
-  server.listen(port);
+  if (bind) {
+    server.listen(port, bind);
+  } else {
+    server.listen(port);
+  }
   return { server, port, api };
 }
 

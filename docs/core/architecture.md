@@ -57,6 +57,14 @@ flowchart LR
 ## Integration Surfaces
 
 - REST API (`/api/...`)
+- Gateway WebSocket control plane (`/gateway/ws`) for session-to-session and node orchestration
 - local and messaging channel adapters
 - plugin tool SDK
 - OpenAPI + SDK clients (TypeScript/Python)
+
+## Gateway Runtime Additions
+
+- Node registry + invoke model (`node.list`, `node.describe`, `node.invoke`)
+- Device bridge protocol (`/bridge/ws`) for companion node register/heartbeat/invoke
+- Managed browser control (Chrome/Chromium CDP bootstrap + target open/list)
+- Tailscale exposure planning/apply (`off|serve|funnel`) with loopback safety checks

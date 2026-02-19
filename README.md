@@ -13,6 +13,7 @@ Agent company plans, debates, executes, verifies, and reports done.
 - Runtime guardrails: risk scoring, approvals, and pause/resume checkpoints
 - Reliability controls: budget circuit breakers, council timeouts, durable notification outbox retries
 - Learning without drift: soul version history and rollback
+- Gateway control plane: REST + WebSocket RPC for sessions, nodes, browser, and remote ops
 - Open integrations: OpenAPI spec + TypeScript/Python clients
 
 ## Start In 60 Seconds
@@ -181,6 +182,76 @@ npx prisma generate
 - `GET /api/channels/sessions/:sessionId/messages`
 - `POST /api/channels/:channelId/webhook`
 - `GET /api/channels/:channelId/webhook` (platform verification handshake where supported)
+
+### Gateway Control Plane (WebSocket + Nodes)
+- `GET /api/gateway/status`
+- `GET /api/gateway/ws-info`
+- `GET /api/gateway/bridge/status`
+- `GET /api/gateway/bridge/ws-info`
+- `GET /api/gateway/bridge/nodes`
+- `GET /api/gateway/nodes`
+- `POST /api/gateway/nodes/register`
+- `GET /api/gateway/nodes/:nodeId`
+- `POST /api/gateway/nodes/:nodeId/invoke`
+- `GET /api/gateway/browser/status`
+- `POST /api/gateway/browser/start`
+- `POST /api/gateway/browser/stop`
+- `GET /api/gateway/browser/targets`
+- `POST /api/gateway/browser/open`
+- `POST /api/gateway/browser/cdp`
+- `GET /api/gateway/tailscale/status`
+- `POST /api/gateway/tailscale/plan`
+- `POST /api/gateway/tailscale/apply`
+
+Gateway WebSocket RPC methods:
+- `gateway.ping`, `gateway.status`, `events.subscribe`
+- `sessions.list`, `sessions.history`, `sessions.send`
+- `node.list`, `node.describe`, `node.invoke`
+- `bridge.status`, `bridge.nodes`
+- `browser.status`, `browser.open`
+- `tailscale.status`, `tailscale.plan`, `tailscale.apply`
+
+Current node action coverage:
+- implemented on host node: `system.run`, `system.notify`, `location.get`, `browser.open_url`, `browser.status`
+- implemented for connected bridge nodes: `node.invoke` over `/bridge/ws`
+- scaffolded for companion nodes: `camera.snap`, `camera.clip`, `screen.record`
+
+Device bridge protocol:
+- Companion connects to `ws://<host>:3001/bridge/ws` (or `wss://...`)
+- Companion registers with `bridge.register` and heartbeats with `bridge.heartbeat`
+- Gateway executes remote actions by sending `bridge.invoke` and waiting for result
+
+macOS companion runtime:
+
+```bash
+npm run companion:macos
+```
+
+Bridge + companion quick setup:
+
+```bash
+# terminal 1
+cp .env.example .env
+export DEVICE_BRIDGE_TOKEN="replace-me"
+npm run start
+```
+
+```bash
+# terminal 2
+export COMPANION_BRIDGE_TOKEN="replace-me"
+export COMPANION_NODE_ID="macos-borhen"
+npm run companion:macos
+```
+
+```bash
+# terminal 3 (invoke companion node action through gateway)
+curl -X POST http://localhost:3001/api/gateway/nodes/macos-borhen/invoke \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "system.notify",
+    "input": { "title": "SOVEREIGN", "message": "Bridge invoke is live." }
+  }'
+```
 
 ### Autopilot Delegation
 - `GET /api/autopilot/goals`

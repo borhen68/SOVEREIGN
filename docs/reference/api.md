@@ -62,9 +62,57 @@ console.log(run);
   - `GET /api/observability/events`
   - `GET /api/observability/metrics`
   - `GET /api/observability/traces`
+- Gateway control plane:
+  - `GET /api/gateway/status`
+  - `GET /api/gateway/ws-info`
+  - `GET /api/gateway/bridge/status`
+  - `GET /api/gateway/bridge/ws-info`
+  - `GET /api/gateway/bridge/nodes`
+  - `GET /api/gateway/nodes`
+  - `POST /api/gateway/nodes/register`
+  - `POST /api/gateway/nodes/:nodeId/invoke`
+  - `GET /api/gateway/browser/status`
+  - `POST /api/gateway/browser/open`
+  - `POST /api/gateway/tailscale/plan`
 
 ## API Notes
 
 - Some write paths support idempotency keys (for replay safety).
 - Runtime trust and approval flows mediate high-risk actions.
 - Use `workspaceId` consistently for multi-workspace isolation boundaries.
+
+## Gateway WebSocket Control Plane
+
+Discover endpoint:
+
+- `GET /api/gateway/ws-info`
+
+RPC methods over WebSocket:
+
+- `gateway.ping`, `gateway.status`, `events.subscribe`
+- `sessions.list`, `sessions.history`, `sessions.send`
+- `node.list`, `node.describe`, `node.invoke`
+- `bridge.status`, `bridge.nodes`
+- `browser.status`, `browser.open`
+- `tailscale.status`, `tailscale.plan`, `tailscale.apply`
+
+Node action support in this build:
+
+- Implemented (host node): `system.run`, `system.notify`, `location.get`, `browser.open_url`, `browser.status`
+- Implemented (bridge-connected companion nodes): `node.invoke` request/response over `/bridge/ws`
+- Scaffolded (requires native app APIs): `camera.snap`, `camera.clip`, `screen.record`
+
+## Bridge Invocation Example
+
+1. Start API with bridge token (`DEVICE_BRIDGE_TOKEN`) configured.
+2. Start macOS companion runtime (`npm run companion:macos`) with matching `COMPANION_BRIDGE_TOKEN`.
+3. Invoke remote node action:
+
+```bash
+curl -X POST http://localhost:3001/api/gateway/nodes/<nodeId>/invoke \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "system.notify",
+    "input": { "title": "SOVEREIGN", "message": "Remote invoke works." }
+  }'
+```

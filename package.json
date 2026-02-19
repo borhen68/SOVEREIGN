@@ -13,6 +13,7 @@
     "start:prod": "node dist/src/server.js",
     "worker:prod": "node dist/src/worker.js",
     "ui": "npm run build && node dist/src/cli/local-ui.js",
+    "companion:macos": "npm run build && node dist/src/companion/macos-node.js",
     "test": "npm run build && node --test dist/test/*.test.js",
     "check": "npm run build && node --test dist/test/*.test.js"
   },

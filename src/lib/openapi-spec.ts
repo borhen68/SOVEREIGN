@@ -53,6 +53,7 @@ export function buildOpenApiSpec(baseUrl = "http://localhost:3001") {
     servers: [{ url: baseUrl }],
     tags: [
       { name: "System" },
+      { name: "Gateway" },
       { name: "LLM" },
       { name: "Agents" },
       { name: "Missions" },
@@ -98,6 +99,140 @@ export function buildOpenApiSpec(baseUrl = "http://localhost:3001") {
         get: {
           tags: ["System"],
           operationId: "getPersistenceStatus",
+          responses: jsonResponse()
+        }
+      },
+      "/api/gateway/status": {
+        get: {
+          tags: ["Gateway"],
+          operationId: "getGatewayStatus",
+          responses: jsonResponse()
+        }
+      },
+      "/api/gateway/ws-info": {
+        get: {
+          tags: ["Gateway"],
+          operationId: "getGatewayWsInfo",
+          responses: jsonResponse()
+        }
+      },
+      "/api/gateway/bridge/status": {
+        get: {
+          tags: ["Gateway"],
+          operationId: "getGatewayBridgeStatus",
+          responses: jsonResponse()
+        }
+      },
+      "/api/gateway/bridge/ws-info": {
+        get: {
+          tags: ["Gateway"],
+          operationId: "getGatewayBridgeWsInfo",
+          responses: jsonResponse()
+        }
+      },
+      "/api/gateway/bridge/nodes": {
+        get: {
+          tags: ["Gateway"],
+          operationId: "listGatewayBridgeNodes",
+          responses: jsonResponse()
+        }
+      },
+      "/api/gateway/nodes": {
+        get: {
+          tags: ["Gateway"],
+          operationId: "listGatewayNodes",
+          responses: jsonResponse()
+        }
+      },
+      "/api/gateway/nodes/register": {
+        post: {
+          tags: ["Gateway"],
+          operationId: "registerGatewayNode",
+          requestBody: bodyRequest(true),
+          responses: jsonResponse()
+        }
+      },
+      "/api/gateway/nodes/{nodeId}": {
+        get: {
+          tags: ["Gateway"],
+          operationId: "getGatewayNode",
+          parameters: idPathParam("nodeId", "Node identifier"),
+          responses: jsonResponse()
+        }
+      },
+      "/api/gateway/nodes/{nodeId}/invoke": {
+        post: {
+          tags: ["Gateway"],
+          operationId: "invokeGatewayNode",
+          parameters: idPathParam("nodeId", "Node identifier"),
+          requestBody: bodyRequest(true),
+          responses: jsonResponse()
+        }
+      },
+      "/api/gateway/browser/status": {
+        get: {
+          tags: ["Gateway"],
+          operationId: "getGatewayBrowserStatus",
+          responses: jsonResponse()
+        }
+      },
+      "/api/gateway/browser/start": {
+        post: {
+          tags: ["Gateway"],
+          operationId: "startGatewayBrowser",
+          responses: jsonResponse()
+        }
+      },
+      "/api/gateway/browser/stop": {
+        post: {
+          tags: ["Gateway"],
+          operationId: "stopGatewayBrowser",
+          responses: jsonResponse()
+        }
+      },
+      "/api/gateway/browser/targets": {
+        get: {
+          tags: ["Gateway"],
+          operationId: "listGatewayBrowserTargets",
+          responses: jsonResponse()
+        }
+      },
+      "/api/gateway/browser/open": {
+        post: {
+          tags: ["Gateway"],
+          operationId: "openGatewayBrowserUrl",
+          requestBody: bodyRequest(true),
+          responses: jsonResponse()
+        }
+      },
+      "/api/gateway/browser/cdp": {
+        post: {
+          tags: ["Gateway"],
+          operationId: "runGatewayBrowserCdp",
+          requestBody: bodyRequest(true),
+          responses: jsonResponse()
+        }
+      },
+      "/api/gateway/tailscale/status": {
+        get: {
+          tags: ["Gateway"],
+          operationId: "getGatewayTailscaleStatus",
+          responses: jsonResponse()
+        }
+      },
+      "/api/gateway/tailscale/plan": {
+        post: {
+          tags: ["Gateway"],
+          operationId: "planGatewayTailscale",
+          requestBody: bodyRequest(false),
+          responses: jsonResponse()
+        }
+      },
+      "/api/gateway/tailscale/apply": {
+        post: {
+          tags: ["Gateway"],
+          operationId: "applyGatewayTailscale",
+          requestBody: bodyRequest(false),
           responses: jsonResponse()
         }
       },
