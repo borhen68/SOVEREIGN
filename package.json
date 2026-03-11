@@ -27,7 +27,7 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
-    "@prisma/client": "^6.19.2",
+    "@prisma/client": "^7.5.0",
     "pg": "^8.18.0",
     "redis": "^5.11.0"
   }
