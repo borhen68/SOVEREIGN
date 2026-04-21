@@ -1,0 +1,11 @@
+{
+  "id": "filesystem",
+  "name": "Native FileSystem Plugin",
+  "version": "0.1.0",
+  "description": "Provides native tools for SOVEREIGN to read, write, and manage local files on the host.",
+  "entry": "index.js",
+  "permissions": {
+    "network": false,
+    "filesystem": true
+  }
+}

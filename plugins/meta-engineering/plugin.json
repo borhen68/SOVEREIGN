@@ -1,0 +1,11 @@
+{
+  "id": "meta-engineering",
+  "name": "Meta Programming Engine",
+  "version": "0.1.0",
+  "description": "Exposes core functionality for the agent to write, compile, and reload its own source code as new plugins.",
+  "entry": "index.js",
+  "permissions": {
+    "network": true,
+    "filesystem": true
+  }
+}

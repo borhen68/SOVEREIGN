@@ -1,0 +1,11 @@
+{
+  "id": "swarm-protocol",
+  "name": "Swarm Genesis Agent Interoperability",
+  "version": "1.0.0",
+  "description": "Allows this SOVEREIGN agent to broadcast missions to OTHER independent SOVEREIGN instances running on different machines to construct a global compute cluster.",
+  "entry": "index.js",
+  "permissions": {
+    "network": true,
+    "filesystem": false
+  }
+}

@@ -1,5 +1,6 @@
 // @ts-nocheck
 import crypto from "node:crypto";
+import { readBearerToken } from "../lib/http.js";
 import { makeId } from "../lib/id.js";
 import { nowIso } from "../lib/time.js";
 
@@ -118,6 +119,8 @@ export class GatewayWebsocketService {
     this.tailscaleExposureService = options.tailscaleExposureService ?? null;
     this.observabilityService = options.observabilityService ?? null;
     this.path = safeString(options.path ?? process.env.GATEWAY_WS_PATH, "/gateway/ws");
+    this.authorizeConnection =
+      typeof options.authorizeConnection === "function" ? options.authorizeConnection : null;
     this.maxPayloadBytes = clampInt(
       options.maxPayloadBytes ?? process.env.GATEWAY_WS_MAX_PAYLOAD,
       1_000_000,
@@ -152,7 +155,7 @@ export class GatewayWebsocketService {
     };
   }
 
-  handleUpgrade(req, socket, head = Buffer.alloc(0)) {
+  async handleUpgrade(req, socket, head = Buffer.alloc(0)) {
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
     if (url.pathname !== this.path) {
       return false;
@@ -163,6 +166,35 @@ export class GatewayWebsocketService {
     if (!key || upgrade !== "websocket") {
       socket.write("HTTP/1.1 400 Bad Request\r\n\r\n");
       socket.destroy();
+      return true;
+    }
+
+    const workspaceId = safeString(url.searchParams.get("workspaceId"), "default");
+    const token = readBearerToken(req, url);
+    const auth =
+      typeof this.authorizeConnection === "function"
+        ? await this.authorizeConnection({
+            token,
+            workspaceId,
+            channelId: "gateway",
+            requiredScopes: ["gateway:connect", "gateway:read", "gateway:write", "gateway:admin"],
+            req,
+            url
+          })
+        : {
+            authorized: true,
+            reason: "auth-not-configured",
+            scopes: ["*"],
+            auth: null
+          };
+    if (!auth?.authorized) {
+      socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+      socket.destroy();
+      this.#observe("gateway.ws.unauthorized", "Rejected unauthorized gateway websocket upgrade.", {
+        remoteAddress: safeString(req.socket?.remoteAddress),
+        reason: auth?.reason ?? "unauthorized",
+        workspaceId
+      });
       return true;
     }
 
@@ -184,7 +216,10 @@ export class GatewayWebsocketService {
       buffer: Buffer.alloc(0),
       connectedAt: nowIso(),
       remoteAddress: safeString(req.socket?.remoteAddress),
-      subscriptions: new Set(["*"])
+      subscriptions: new Set(["*"]),
+      workspaceId,
+      authScopes: Array.isArray(auth?.scopes) ? auth.scopes.map((item) => String(item)) : ["*"],
+      authContext: auth?.auth ?? null
     };
     this.connections.set(connection.id, connection);
     this.#observe("gateway.ws.connected", "Gateway websocket client connected.", {
@@ -247,6 +282,7 @@ export class GatewayWebsocketService {
     }
 
     try {
+      this.#assertAuthorized(connection, method);
       const result = await this.#dispatch(connection, method, payload.params ?? {});
       this.#send(connection, {
         type: "result",
@@ -474,6 +510,98 @@ export class GatewayWebsocketService {
   #notFound(message) {
     const error = new Error(message);
     error.statusCode = 404;
+    return error;
+  }
+
+  #assertAuthorized(connection, method) {
+    const requiredScopes = this.#requiredScopesForMethod(method);
+    if (requiredScopes.length === 0) {
+      return;
+    }
+    const granted = Array.isArray(connection?.authScopes)
+      ? connection.authScopes.map((item) => String(item).trim().toLowerCase())
+      : [];
+    if (
+      granted.includes("*") ||
+      granted.includes("admin") ||
+      requiredScopes.some((scope) => this.#hasScope(granted, scope))
+    ) {
+      return;
+    }
+    throw this.#unauthorized(`Missing scope for gateway method '${method}'.`);
+  }
+
+  #requiredScopesForMethod(method) {
+    const normalized = safeString(method).toLowerCase();
+    if (!normalized) {
+      return [];
+    }
+    if (normalized === "gateway.ping" || normalized === "gateway.status" || normalized === "events.subscribe") {
+      return ["gateway:read"];
+    }
+    if (normalized === "sessions.list" || normalized === "sessions_list") {
+      return ["gateway:read"];
+    }
+    if (normalized === "sessions.history" || normalized === "sessions_history") {
+      return ["gateway:read"];
+    }
+    if (normalized === "sessions.send" || normalized === "sessions_send") {
+      return ["gateway:write"];
+    }
+    if (normalized === "node.list" || normalized === "node_list") {
+      return ["gateway:read"];
+    }
+    if (normalized === "node.describe" || normalized === "node_describe") {
+      return ["gateway:read"];
+    }
+    if (normalized === "node.invoke" || normalized === "node_invoke") {
+      return ["gateway:node:invoke", "gateway:write", "gateway:admin"];
+    }
+    if (normalized === "bridge.status" || normalized === "bridge.ws_info" || normalized === "bridge.ws-info") {
+      return ["gateway:read"];
+    }
+    if (normalized === "bridge.nodes") {
+      return ["gateway:read"];
+    }
+    if (normalized === "browser.status") {
+      return ["gateway:read"];
+    }
+    if (normalized === "browser.open") {
+      return ["gateway:browser:control", "gateway:write", "gateway:admin"];
+    }
+    if (normalized === "tailscale.status") {
+      return ["gateway:read"];
+    }
+    if (normalized === "tailscale.plan") {
+      return ["gateway:admin"];
+    }
+    if (normalized === "tailscale.apply") {
+      return ["gateway:admin"];
+    }
+    return ["gateway:admin"];
+  }
+
+  #hasScope(grantedScopes, requiredScope) {
+    const normalized = safeString(requiredScope).toLowerCase();
+    if (!normalized) {
+      return true;
+    }
+    if (grantedScopes.includes(normalized)) {
+      return true;
+    }
+    const parts = normalized.split(":");
+    while (parts.length > 1) {
+      parts.pop();
+      if (grantedScopes.includes(`${parts.join(":")}:*`)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  #unauthorized(message) {
+    const error = new Error(message);
+    error.statusCode = 401;
     return error;
   }
 }

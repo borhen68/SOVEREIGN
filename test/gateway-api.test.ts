@@ -45,64 +45,77 @@ function tryParseJson(payload) {
   }
 }
 
+const AUTH_TOKEN = "test-gateway-bootstrap-token";
+
+function withGatewayAuth(input = {}) {
+  return {
+    ...input,
+    headers: {
+      authorization: `Bearer ${AUTH_TOKEN}`,
+      ...(input.headers ?? {})
+    }
+  };
+}
+
 test("gateway API exposes control plane status, nodes, browser, and tailscale plans", async () => {
   const cwd = process.cwd();
   const api = createApi({
     cwd,
     persistPath: null,
     pluginsDir: path.join(cwd, "dist", "plugins"),
+    securityBootstrapToken: AUTH_TOKEN,
     autopilotAutoStart: false,
     heartbeatAutoStart: false
   });
 
-  const statusResponse = await callApi(api.handler, {
+  const statusResponse = await callApi(api.handler, withGatewayAuth({
     method: "GET",
     url: "/api/gateway/status"
-  });
+  }));
   assert.equal(statusResponse.status, 200);
   assert.equal(typeof statusResponse.body.gateway?.wsPath, "string");
   assert.equal(typeof statusResponse.body.ws?.url, "string");
   assert.match(statusResponse.body.ws.url, /^ws:\/\//);
 
-  const wsInfoResponse = await callApi(api.handler, {
+  const wsInfoResponse = await callApi(api.handler, withGatewayAuth({
     method: "GET",
     url: "/api/gateway/ws-info"
-  });
+  }));
   assert.equal(wsInfoResponse.status, 200);
   assert.equal(typeof wsInfoResponse.body.path, "string");
   assert.equal(typeof wsInfoResponse.body.url, "string");
 
-  const bridgeStatusResponse = await callApi(api.handler, {
+  const bridgeStatusResponse = await callApi(api.handler, withGatewayAuth({
     method: "GET",
     url: "/api/gateway/bridge/status"
-  });
+  }));
   assert.equal(bridgeStatusResponse.status, 200);
   assert.equal(typeof bridgeStatusResponse.body.bridge?.path, "string");
 
-  const bridgeWsInfoResponse = await callApi(api.handler, {
+  const bridgeWsInfoResponse = await callApi(api.handler, withGatewayAuth({
     method: "GET",
     url: "/api/gateway/bridge/ws-info"
-  });
+  }));
   assert.equal(bridgeWsInfoResponse.status, 200);
   assert.equal(typeof bridgeWsInfoResponse.body.path, "string");
   assert.equal(typeof bridgeWsInfoResponse.body.url, "string");
 
-  const bridgeNodesResponse = await callApi(api.handler, {
+  const bridgeNodesResponse = await callApi(api.handler, withGatewayAuth({
     method: "GET",
     url: "/api/gateway/bridge/nodes"
-  });
+  }));
   assert.equal(bridgeNodesResponse.status, 200);
   assert.equal(Array.isArray(bridgeNodesResponse.body.nodes), true);
 
-  const nodesResponse = await callApi(api.handler, {
+  const nodesResponse = await callApi(api.handler, withGatewayAuth({
     method: "GET",
     url: "/api/gateway/nodes"
-  });
+  }));
   assert.equal(nodesResponse.status, 200);
   assert.equal(Array.isArray(nodesResponse.body.nodes), true);
   assert.ok(nodesResponse.body.nodes.some((node) => node.id === "host-node"));
 
-  const registerNodeResponse = await callApi(api.handler, {
+  const registerNodeResponse = await callApi(api.handler, withGatewayAuth({
     method: "POST",
     url: "/api/gateway/nodes/register",
     body: {
@@ -111,50 +124,69 @@ test("gateway API exposes control plane status, nodes, browser, and tailscale pl
       type: "ios",
       capabilities: ["camera.snap", "screen.record"]
     }
-  });
+  }));
   assert.equal(registerNodeResponse.status, 201);
   assert.equal(registerNodeResponse.body.node.id, "ios-node-1");
 
-  const getNodeResponse = await callApi(api.handler, {
+  const getNodeResponse = await callApi(api.handler, withGatewayAuth({
     method: "GET",
     url: "/api/gateway/nodes/ios-node-1"
-  });
+  }));
   assert.equal(getNodeResponse.status, 200);
   assert.equal(getNodeResponse.body.node.id, "ios-node-1");
 
-  const invokeResponse = await callApi(api.handler, {
+  const invokeResponse = await callApi(api.handler, withGatewayAuth({
     method: "POST",
     url: "/api/gateway/nodes/host-node/invoke",
     body: {
       action: "location.get",
       input: {}
     }
-  });
+  }));
   assert.equal(invokeResponse.status, 200);
   assert.equal(invokeResponse.body.invocation.ok, true);
   assert.equal(invokeResponse.body.invocation.action, "location.get");
 
-  const browserStatusResponse = await callApi(api.handler, {
+  const browserStatusResponse = await callApi(api.handler, withGatewayAuth({
     method: "GET",
     url: "/api/gateway/browser/status"
-  });
+  }));
   assert.equal(browserStatusResponse.status, 200);
   assert.equal(typeof browserStatusResponse.body.browser?.enabled, "boolean");
 
-  const tailscaleStatusResponse = await callApi(api.handler, {
+  const tailscaleStatusResponse = await callApi(api.handler, withGatewayAuth({
     method: "GET",
     url: "/api/gateway/tailscale/status"
-  });
+  }));
   assert.equal(tailscaleStatusResponse.status, 200);
   assert.equal(typeof tailscaleStatusResponse.body.tailscale?.mode, "string");
 
-  const tailscalePlanResponse = await callApi(api.handler, {
+  const tailscalePlanResponse = await callApi(api.handler, withGatewayAuth({
     method: "POST",
     url: "/api/gateway/tailscale/plan",
     body: {
       mode: "off"
     }
-  });
+  }));
   assert.equal(tailscalePlanResponse.status, 200);
   assert.equal(Array.isArray(tailscalePlanResponse.body.plan.commands), true);
+});
+
+test("gateway API rejects unauthenticated control plane access", async () => {
+  const cwd = process.cwd();
+  const api = createApi({
+    cwd,
+    persistPath: null,
+    pluginsDir: path.join(cwd, "dist", "plugins"),
+    securityBootstrapToken: AUTH_TOKEN,
+    autopilotAutoStart: false,
+    heartbeatAutoStart: false
+  });
+
+  const response = await callApi(api.handler, {
+    method: "GET",
+    url: "/api/gateway/status"
+  });
+  assert.equal(response.status, 401);
+  assert.match(String(response.body.error ?? ""), /Unauthorized/i);
 });

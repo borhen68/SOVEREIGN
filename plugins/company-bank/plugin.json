@@ -1,0 +1,11 @@
+{
+  "id": "company-bank",
+  "name": "Company Bank",
+  "version": "0.1.0",
+  "description": "Financial autonomy layer. Tracks a spending budget and enables the agent to make real-world payments via Stripe or crypto.",
+  "entry": "index.js",
+  "permissions": {
+    "network": true,
+    "filesystem": true
+  }
+}

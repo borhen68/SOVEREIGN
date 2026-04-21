@@ -97,10 +97,14 @@ function normalizeUsage(usage) {
         ? (promptTokens ?? 0) + (completionTokens ?? 0)
         : null)
   );
+  const reasoningTokens = safeNumber(
+    usage.reasoning_tokens ?? usage.reasoningTokens
+  );
   return {
     promptTokens: promptTokens === null ? null : Math.max(0, Math.round(promptTokens)),
     completionTokens: completionTokens === null ? null : Math.max(0, Math.round(completionTokens)),
-    totalTokens: totalTokens === null ? null : Math.max(0, Math.round(totalTokens))
+    totalTokens: totalTokens === null ? null : Math.max(0, Math.round(totalTokens)),
+    reasoningTokens: reasoningTokens === null ? null : Math.max(0, Math.round(reasoningTokens))
   };
 }
 
@@ -303,8 +307,71 @@ const OPENAI_COMPAT_PROVIDER_SPECS = [
     defaultBaseUrl: "",
     modelEnv: "CUSTOM_LLM_MODEL",
     defaultModel: "gpt-4o-mini"
+  },
+  {
+    id: "nvidia",
+    aliases: ["nvidia", "nv"],
+    keyEnv: "NVIDIA_API_KEY",
+    baseEnv: "NVIDIA_BASE_URL",
+    defaultBaseUrl: "https://integrate.api.nvidia.com/v1",
+    modelEnv: "NVIDIA_MODEL",
+    defaultModel: "z-ai/glm4.7"
   }
 ];
+
+/**
+ * Hermes-grade Model Routing Tier Preferences.
+ *
+ * Each tier defines an ordered list of provider+model combinations
+ * ranked by suitability for that task class. The system walks the list
+ * and picks the first provider that is configured (has a valid API key).
+ *
+ * - tool:      Optimized for structured tool/function calling (low hallucination).
+ * - reasoning: High-capability models for Council debates, planning, critic analysis.
+ * - small:     Fast, low-cost models for summarization, classification, utilities.
+ * - coding:    Models tuned for code generation, review, and debugging.
+ */
+const MODEL_TIER_PREFERENCES = Object.freeze({
+  tool: [
+    { provider: "groq",       model: "llama-3.3-70b-versatile" },
+    { provider: "fireworks",  model: "accounts/fireworks/models/llama-v3p1-70b-instruct" },
+    { provider: "together",   model: "meta-llama/Llama-3.3-70B-Instruct-Turbo" },
+    { provider: "openai",     model: "gpt-4o-mini" },
+    { provider: "anthropic",  model: "claude-3-5-sonnet-latest" },
+    { provider: "gemini",     model: "gemini-1.5-flash" },
+    { provider: "cerebras",   model: "llama3.1-70b" },
+    { provider: "deepseek",   model: "deepseek-chat" },
+    { provider: "ollama",     model: "llama3.2" }
+  ],
+  reasoning: [
+    { provider: "nvidia",     model: "z-ai/glm4.7" },
+    { provider: "anthropic",  model: "claude-3-5-sonnet-latest" },
+    { provider: "openai",     model: "gpt-4o" },
+    { provider: "gemini",     model: "gemini-1.5-pro" },
+    { provider: "deepseek",   model: "deepseek-chat" },
+    { provider: "mistral",    model: "mistral-large-latest" },
+    { provider: "xai",        model: "grok-2-latest" },
+    { provider: "cohere",     model: "command-r-plus" },
+    { provider: "openrouter", model: "openai/gpt-4o" }
+  ],
+  small: [
+    { provider: "openai",     model: "gpt-4o-mini" },
+    { provider: "gemini",     model: "gemini-1.5-flash" },
+    { provider: "groq",       model: "llama-3.3-70b-versatile" },
+    { provider: "cerebras",   model: "llama3.1-70b" },
+    { provider: "anthropic",  model: "claude-3-5-haiku-latest" },
+    { provider: "mistral",    model: "mistral-small-latest" },
+    { provider: "ollama",     model: "llama3.2" }
+  ],
+  coding: [
+    { provider: "anthropic",  model: "claude-3-5-sonnet-latest" },
+    { provider: "deepseek",   model: "deepseek-coder" },
+    { provider: "openai",     model: "gpt-4o" },
+    { provider: "gemini",     model: "gemini-1.5-pro" },
+    { provider: "fireworks",  model: "accounts/fireworks/models/llama-v3p1-70b-instruct" },
+    { provider: "together",   model: "meta-llama/Llama-3.3-70B-Instruct-Turbo" }
+  ]
+});
 
 export class LlmService {
   constructor(options = {}) {
@@ -412,6 +479,76 @@ export class LlmService {
     return `${first.provider}/${first.defaultModel}`;
   }
 
+  /**
+   * Hermes-grade Model Routing: Resolve the best model for structured tool/function calling.
+   *
+   * Prefers models known for low hallucination rates on tool-use tasks:
+   * Hermes models via OpenRouter, Groq (fast Hermes inference), function-calling-tuned models.
+   * Falls back to the default model if no specialized tool-caller is configured.
+   *
+   * @param {string} [preferredProvider] - Optional provider preference.
+   * @returns {string|null} modelRef like "groq/llama-3.3-70b-versatile"
+   */
+  resolveToolModelRef(preferredProvider = "") {
+    return this.#resolveModelRefByTier("tool", preferredProvider);
+  }
+
+  /**
+   * Hermes-grade Model Routing: Resolve the best model for high-reasoning tasks.
+   *
+   * Used for Council debates, Critic analysis, and complex planning.
+   * Prefers large reasoning models (GPT-4o, Claude 3.5, Gemini 1.5 Pro).
+   *
+   * @param {string} [preferredProvider] - Optional provider preference.
+   * @returns {string|null} modelRef like "openai/gpt-4o"
+   */
+  resolveReasoningModelRef(preferredProvider = "") {
+    return this.#resolveModelRefByTier("reasoning", preferredProvider);
+  }
+
+  /**
+   * Hermes-grade Model Routing: Resolve a fast/small model for lightweight operations.
+   *
+   * Used for summarization, classification, and low-latency utility tasks.
+   * Prefers small footprint models (GPT-4o-mini, Gemini Flash, Llama 8B).
+   *
+   * @param {string} [preferredProvider] - Optional provider preference.
+   * @returns {string|null} modelRef like "openai/gpt-4o-mini"
+   */
+  resolveSmallModelRef(preferredProvider = "") {
+    return this.#resolveModelRefByTier("small", preferredProvider);
+  }
+
+  /**
+   * Resolve the optimal model ref for a given tier.
+   *
+   * @param {"tool"|"reasoning"|"small"|"coding"} tier
+   * @param {string} [preferredProvider]
+   * @returns {string|null}
+   */
+  resolveModelRefByTier(tier, preferredProvider = "") {
+    return this.#resolveModelRefByTier(tier, preferredProvider);
+  }
+
+  /**
+   * Returns the tier configuration for inspection/debugging.
+   */
+  getModelTiers() {
+    const configuredProviders = new Set(
+      this.listProviders().filter((entry) => entry.configured).map((entry) => entry.provider)
+    );
+    const tiers = {};
+    for (const [tier, preferences] of Object.entries(MODEL_TIER_PREFERENCES)) {
+      const resolved = this.#resolveModelRefByTier(tier);
+      tiers[tier] = {
+        resolved,
+        preferenceCount: preferences.length,
+        configuredCandidates: preferences.filter((pref) => configuredProviders.has(pref.provider)).length
+      };
+    }
+    return tiers;
+  }
+
   normalizeModelRef(raw, fallbackProvider = "") {
     const parsed = this.#parseModelRef(raw, fallbackProvider);
     if (!parsed) {
@@ -454,6 +591,7 @@ export class LlmService {
         candidateCount: candidates.length,
         promptChars: prompt.length,
         systemChars: system.length,
+        hasImage: Boolean(input.imageUrl || input.imagePath),
         temperature,
         maxTokens
       }
@@ -468,7 +606,9 @@ export class LlmService {
           prompt,
           system,
           temperature,
-          maxTokens
+          maxTokens,
+          imageUrl: input.imageUrl,
+          imagePath: input.imagePath
         });
         const usage = normalizeUsage(completion.usage);
         const costUsd = this.#estimateCostUsd(usage.totalTokens);
@@ -755,6 +895,44 @@ export class LlmService {
     }
   }
 
+  #resolveModelRefByTier(tier, preferredProvider = "") {
+    const preferences = MODEL_TIER_PREFERENCES[tier];
+    if (!Array.isArray(preferences) || preferences.length === 0) {
+      return this.resolveDefaultModelRef(preferredProvider);
+    }
+
+    const configuredProviders = new Map();
+    for (const entry of this.listProviders()) {
+      if (entry.configured) {
+        configuredProviders.set(entry.provider, entry);
+      }
+    }
+
+    // If a preferred provider is specified and configured, check if it's in the tier preferences
+    const preferred = this.#normalizeProvider(preferredProvider);
+    if (preferred && configuredProviders.has(preferred)) {
+      const tierPref = preferences.find((pref) => pref.provider === preferred);
+      if (tierPref) {
+        return `${preferred}/${tierPref.model}`;
+      }
+      // Not in tier preferences, but configured — use its default model
+      const providerConfig = configuredProviders.get(preferred);
+      if (providerConfig && providerConfig.defaultModel) {
+        return `${preferred}/${providerConfig.defaultModel}`;
+      }
+    }
+
+    // Walk the tier preference list and pick the first configured provider
+    for (const pref of preferences) {
+      if (configuredProviders.has(pref.provider)) {
+        return `${pref.provider}/${pref.model}`;
+      }
+    }
+
+    // No tier-specific provider is configured — fall back to default
+    return this.resolveDefaultModelRef(preferredProvider);
+  }
+
   async #dispatch(candidate, request) {
     const provider = this.providers.get(candidate.provider);
     if (!provider) {
@@ -807,15 +985,30 @@ export class LlmService {
       headers.authorization = `Bearer ${input.apiKey}`;
     }
 
+    const userContent = [];
+    if (input.imageUrl) {
+      userContent.push({ type: "image_url", image_url: { url: input.imageUrl } });
+    } else if (input.imagePath) {
+      // Logic for local file relative to CWD
+      const b64 = fs.readFileSync(path.resolve(process.cwd(), input.imagePath)).toString("base64");
+      userContent.push({ type: "image_url", image_url: { url: `data:image/png;base64,${b64}` } });
+    }
+    userContent.push({ type: "text", text: input.prompt });
+
     const payload = {
       model: input.model,
       messages: [
         ...(input.system ? [{ role: "system", content: input.system }] : []),
-        { role: "user", content: input.prompt }
+        { role: "user", content: userContent }
       ],
       temperature: input.temperature,
       max_tokens: input.maxTokens
     };
+    
+    // NVIDIA / DeepSeek Reasoning Template Kwargs
+    if (input.provider === "nvidia" || String(input.model).includes("glm4.7")) {
+       payload.chat_template_kwargs = { enable_thinking: true, clear_thinking: false };
+    }
 
     const json = await this.#fetchJson(`${baseUrl}/chat/completions`, {
       method: "POST",
@@ -823,8 +1016,9 @@ export class LlmService {
       body: JSON.stringify(payload)
     });
 
-    const content = json?.choices?.[0]?.message?.content;
-    const text =
+    const messageObj = json?.choices?.[0]?.message;
+    const content = messageObj?.content;
+    let text =
       typeof content === "string"
         ? content
         : Array.isArray(content)
@@ -835,14 +1029,34 @@ export class LlmService {
               .filter(Boolean)
               .join("\n")
           : "";
+          
+    if (messageObj?.reasoning_content && typeof messageObj.reasoning_content === "string") {
+      text = `<thought>\n${messageObj.reasoning_content.trim()}\n</thought>\n\n${text}`;
+    }
+
     if (!text.trim()) {
       throw this.#upstream(`${input.provider} response did not contain text content.`);
     }
+
+    const rawUsage = json?.usage ?? null;
+    let normalizedUsage = null;
+    if (rawUsage) {
+      normalizedUsage = {
+        prompt_tokens: rawUsage.prompt_tokens,
+        completion_tokens: rawUsage.completion_tokens,
+        total_tokens: rawUsage.total_tokens,
+        reasoning_tokens:
+          rawUsage.completion_tokens_details?.reasoning_tokens ?? 
+          rawUsage.reasoningTokens ?? 
+          0
+      };
+    }
+
     return {
       provider: input.provider,
       model: input.model,
       text: text.trim(),
-      usage: json?.usage ?? null
+      usage: normalizedUsage
     };
   }
 

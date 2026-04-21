@@ -1,0 +1,11 @@
+{
+  "id": "hibernation",
+  "name": "Serverless Hibernation Engine",
+  "version": "1.0.0",
+  "description": "Allows the agent to go to deep sleep to save CPU and RAM, setting up triggers to automatically wake itself up when a condition is met.",
+  "entry": "index.js",
+  "permissions": {
+    "network": false,
+    "filesystem": true
+  }
+}

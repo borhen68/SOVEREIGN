@@ -213,6 +213,7 @@ export class DashboardService {
     this.heartbeatService = options.heartbeatService;
     this.channelGatewayService = options.channelGatewayService;
     this.commandQueue = options.commandQueue;
+    this.setupWizardService = options.setupWizardService ?? null;
     this.snapshotCacheTtlMs = clampInt(
       options.snapshotCacheTtlMs ?? process.env.DASHBOARD_CACHE_TTL_MS,
       1500,
@@ -265,7 +266,8 @@ export class DashboardService {
       agents,
       autopilotGoals,
       heartbeatJobs,
-      channelSessions
+      channelSessions,
+      readiness
     ] = await Promise.all([
       safeCall(
         () => this.companyOrchestratorService.listRuns({ workspaceId, limit: Math.max(limit * 2, 20) }),
@@ -294,7 +296,14 @@ export class DashboardService {
       safeCall(() => this.agentService.listAgents(workspaceId), []),
       safeCall(() => this.autopilotService.listGoals({ workspaceId, limit: 50 }), []),
       safeCall(() => this.heartbeatService.listJobs(workspaceId), []),
-      safeCall(() => this.channelGatewayService.listSessions(workspaceId), [])
+      safeCall(() => this.channelGatewayService.listSessions(workspaceId), []),
+      safeCall(
+        () =>
+          this.setupWizardService && typeof this.setupWizardService.runDoctor === "function"
+            ? this.setupWizardService.runDoctor({ workspaceId })
+            : null,
+        null
+      )
     ]);
 
     const missions = allMissions.filter((mission) => safeString(mission.workspaceId, "default") === workspaceId);
@@ -376,7 +385,8 @@ export class DashboardService {
         avgConsensus: consensusValues.length > 0 ? avg(consensusValues) : 0,
         latencyP95Ms: Number(observabilityMetrics?.latencyMs?.p95 ?? 0),
         tokenUsageTotal: Number(observabilityMetrics?.tokenUsage?.total ?? 0),
-        costUsdTotal: Number(observabilityMetrics?.costUsd?.total ?? 0)
+        costUsdTotal: Number(observabilityMetrics?.costUsd?.total ?? 0),
+        readinessScore: Number(readiness?.score ?? 0)
       },
       orchestrator: {
         latestRuns: runSummaries
@@ -487,6 +497,9 @@ export class DashboardService {
             chatId: session.chatId,
             updatedAt: session.updatedAt
           }))
+      },
+      setup: {
+        readiness
       },
       queue: queueStats
     };

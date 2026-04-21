@@ -1,0 +1,11 @@
+{
+  "id": "vision",
+  "name": "Divine Vision Engine",
+  "version": "1.0.0",
+  "description": "Enables the agent to 'see' the world. It can take a screenshot of the physical desktop and analyze it using advanced multi-modal vision models.",
+  "entry": "index.js",
+  "permissions": {
+    "network": false,
+    "filesystem": true
+  }
+}

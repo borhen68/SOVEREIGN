@@ -662,32 +662,405 @@ export class ChannelGatewayService {
       ].join(" ");
     }
 
-    const history = (await this.store
-      .listChannelSessionMessages(session.id, 12))
+    // Build conversation history with trajectory compression for longer context
+    const rawHistory = await this.store.listChannelSessionMessages(session.id, 30);
+    const history = await this.#buildConversationContext(rawHistory, modelPlan);
+
+    // Build tool manifest for the system prompt
+    const toolManifest = this.#buildToolManifest();
+    const agentContext = this.#buildAgentContext(activeAgent);
+    const systemPrompt = this.#buildReActSystemPrompt(toolManifest, agentContext);
+
+    const MAX_REACT_STEPS = 8;
+    const scratchpad = [];
+    let finalAnswer = null;
+
+    for (let step = 0; step < MAX_REACT_STEPS; step++) {
+      const prompt = this.#buildReActPrompt({
+        systemPrompt,
+        history,
+        userMessage: text,
+        scratchpad,
+        step,
+        isFirstStep: step === 0
+      });
+
+      try {
+        const completion = await this.llmService.respond({
+          modelRef: modelPlan.modelRef,
+          fallbacks: modelPlan.fallbacks,
+          prompt,
+          temperature: 0.15,
+          maxTokens: 1500
+        });
+        const rawOutput = (completion.text ?? "").trim();
+
+        // Parse the ReAct output into structured components
+        const parsed = this.#parseReActOutput(rawOutput);
+
+        // Record the thought in the scratchpad
+        if (parsed.thought) {
+          scratchpad.push({ type: "thought", step: step + 1, content: parsed.thought });
+        }
+
+        // If there's a final answer, we're done
+        if (parsed.answer) {
+          finalAnswer = parsed.answer;
+          break;
+        }
+
+        // If there's a tool action, execute it
+        if (parsed.action && this.pluginService) {
+          scratchpad.push({
+            type: "action",
+            step: step + 1,
+            tool: parsed.action,
+            input: parsed.actionInput
+          });
+
+          const [pluginId, toolName] = parsed.action.split(".");
+          if (pluginId && toolName) {
+            try {
+              const invocation = await this.pluginService.invokeTool(
+                pluginId,
+                toolName,
+                parsed.actionInput ?? {},
+                {
+                  source: "channel.react",
+                  workspaceId,
+                  sessionId: session.id,
+                  channelId: session.channelId,
+                  userId: session.userId
+                }
+              );
+              const resultText = JSON.stringify(invocation.result);
+              const observation = truncate(resultText, 3000);
+              scratchpad.push({
+                type: "observation",
+                step: step + 1,
+                tool: parsed.action,
+                content: observation,
+                success: true
+              });
+            } catch (toolError) {
+              const errMsg = toolError instanceof Error ? toolError.message : String(toolError);
+              scratchpad.push({
+                type: "observation",
+                step: step + 1,
+                tool: parsed.action,
+                content: `ERROR: ${errMsg}`,
+                success: false
+              });
+            }
+            continue;
+          }
+        }
+
+        // If the LLM returned a legacy-format tool call (JSON block), handle it for backwards compat
+        const legacyToolCall = this.#extractToolCall(rawOutput);
+        if (legacyToolCall && this.pluginService) {
+          scratchpad.push({
+            type: "action",
+            step: step + 1,
+            tool: legacyToolCall.action,
+            input: legacyToolCall.input
+          });
+
+          const [pluginId, toolName] = legacyToolCall.action.split(".");
+          if (pluginId && toolName) {
+            try {
+              const invocation = await this.pluginService.invokeTool(
+                pluginId,
+                toolName,
+                legacyToolCall.input ?? {},
+                {
+                  source: "channel.react.legacy",
+                  workspaceId,
+                  sessionId: session.id,
+                  channelId: session.channelId,
+                  userId: session.userId
+                }
+              );
+              const resultText = JSON.stringify(invocation.result);
+              scratchpad.push({
+                type: "observation",
+                step: step + 1,
+                tool: legacyToolCall.action,
+                content: truncate(resultText, 3000),
+                success: true
+              });
+            } catch (toolError) {
+              const errMsg = toolError instanceof Error ? toolError.message : String(toolError);
+              scratchpad.push({
+                type: "observation",
+                step: step + 1,
+                tool: legacyToolCall.action,
+                content: `ERROR: ${errMsg}`,
+                success: false
+              });
+            }
+            continue;
+          }
+        }
+
+        // No tool call and no explicit Answer: — treat the raw output as the final answer
+        finalAnswer = rawOutput;
+        break;
+      } catch (error) {
+        const errMsg = error instanceof Error ? error.message : String(error);
+        scratchpad.push({ type: "error", step: step + 1, content: errMsg });
+        // If this is the first step, fail immediately
+        if (step === 0) {
+          return `LLM error: ${errMsg}`;
+        }
+        // Otherwise, try to synthesize from what we have
+        break;
+      }
+    }
+
+    // If we have a final answer, return it
+    if (finalAnswer) {
+      return truncate(finalAnswer, 4000);
+    }
+
+    // If we exhausted steps without a final answer, synthesize from scratchpad
+    const observations = scratchpad
+      .filter((s) => s.type === "observation" && s.success)
+      .map((s) => s.content);
+    if (observations.length > 0) {
+      return truncate(
+        `I gathered information across ${observations.length} tool call(s) but reached the reasoning limit.\n\nKey findings:\n${observations.join("\n---\n")}`,
+        4000
+      );
+    }
+
+    return "I wasn't able to complete this request. Please try breaking it into smaller steps.";
+  }
+
+  #buildReActSystemPrompt(toolManifest, agentContext) {
+    return [
+      "You are SOVEREIGN, an elite autonomous AI agent. You solve problems step-by-step using structured reasoning.",
+      "",
+      "## REASONING PROTOCOL (ReAct)",
+      "You MUST follow this exact format for EVERY response:",
+      "",
+      "Thought: [Your internal reasoning about what to do next. Analyze what you know, what you need, and your strategy.]",
+      "Action: [pluginId.toolName]",
+      "Action Input: [JSON object with parameters]",
+      "",
+      "OR if you have enough information to answer:",
+      "",
+      "Thought: [Your reasoning about why you can now answer]",
+      "Answer: [Your complete, well-formatted answer to the user]",
+      "",
+      "## RULES",
+      "1. ALWAYS start with a Thought step — never act without thinking first.",
+      "2. After each tool result (Observation), think about what you learned and what to do next.",
+      "3. If a tool fails, reason about alternatives instead of retrying the same approach.",
+      "4. Use the minimum number of tool calls needed. Don't call tools unnecessarily.",
+      "5. When you have gathered enough evidence, synthesize it into a clear Answer.",
+      "6. Your Answer should be comprehensive and directly address the user's request.",
+      "7. CRITICAL CAPABILITY RULE: If the user asks you to perform an action (like converting files, generating PDFs, integrating with APIs) and you DO NOT possess a corresponding tool, YOU MUST NOT use a web browser to try to use online tool websites (they will block you), and YOU MUST NOT hallucinate success. Instead, YOU MUST actively execute the 'meta-engineering.create_plugin' tool to dynamically write the missing TypeScript plugin functionality on the fly! Be a 'wow' meta-engineer.",
+      "",
+      "## AVAILABLE TOOLS",
+      toolManifest,
+      "",
+      agentContext
+    ].filter(Boolean).join("\n");
+  }
+
+  #buildReActPrompt(input) {
+    const parts = [];
+    parts.push(input.systemPrompt);
+
+    if (input.history) {
+      parts.push(`\n## CONVERSATION HISTORY\n${input.history}`);
+    }
+
+    parts.push(`\n## USER REQUEST\n${input.userMessage}`);
+
+    if (input.scratchpad.length > 0) {
+      parts.push("\n## REASONING TRACE (your previous steps)");
+      for (const entry of input.scratchpad) {
+        if (entry.type === "thought") {
+          parts.push(`Thought [Step ${entry.step}]: ${entry.content}`);
+        } else if (entry.type === "action") {
+          parts.push(`Action [Step ${entry.step}]: ${entry.tool}`);
+          parts.push(`Action Input: ${JSON.stringify(entry.input ?? {})}`);
+        } else if (entry.type === "observation") {
+          parts.push(`Observation [Step ${entry.step}]: ${entry.content}`);
+        } else if (entry.type === "error") {
+          parts.push(`Error [Step ${entry.step}]: ${entry.content}`);
+        }
+      }
+      parts.push(
+        "\nContinue your reasoning. Start with a Thought about what you've learned and what to do next."
+      );
+    } else {
+      parts.push(
+        "\nBegin your reasoning. Start with a Thought about the user's request and your approach."
+      );
+    }
+
+    return parts.join("\n");
+  }
+
+  #parseReActOutput(rawOutput) {
+    const result = { thought: null, action: null, actionInput: null, answer: null };
+
+    // Extract Thought
+    const thoughtMatch = rawOutput.match(/Thought\s*(?:\[.*?\])?\s*:\s*([\s\S]*?)(?=\n(?:Action|Answer)\s*(?:\[.*?\])?\s*:|$)/i);
+    if (thoughtMatch) {
+      result.thought = thoughtMatch[1].trim();
+    }
+
+    // Extract Answer (takes priority over Action)
+    const answerMatch = rawOutput.match(/Answer\s*(?:\[.*?\])?\s*:\s*([\s\S]*?)$/i);
+    if (answerMatch) {
+      result.answer = answerMatch[1].trim();
+      return result;
+    }
+
+    // Extract Action
+    const actionMatch = rawOutput.match(/Action\s*(?:\[.*?\])?\s*:\s*(.+)/i);
+    if (actionMatch) {
+      result.action = actionMatch[1].trim();
+    }
+
+    // Extract Action Input
+    const inputMatch = rawOutput.match(/Action\s*Input\s*(?:\[.*?\])?\s*:\s*([\s\S]*?)(?=\n(?:Thought|Action|Answer|Observation)\s*(?:\[.*?\])?\s*:|$)/i);
+    if (inputMatch) {
+      const rawInput = inputMatch[1].trim();
+      try {
+        result.actionInput = JSON.parse(rawInput);
+      } catch {
+        // Try to extract JSON from within the text
+        const jsonMatch = rawInput.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          try {
+            result.actionInput = JSON.parse(jsonMatch[0]);
+          } catch {
+            result.actionInput = {};
+          }
+        } else {
+          result.actionInput = {};
+        }
+      }
+    }
+
+    return result;
+  }
+
+  async #buildConversationContext(messages, modelPlan) {
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return "";
+    }
+
+    // If fewer than 15 messages, return all of them verbatim
+    if (messages.length <= 15) {
+      return messages
+        .map((message) => `${message.authorRole}: ${message.text}`)
+        .join("\n");
+    }
+
+    // Trajectory Compression: Summarize the middle turns using the LLM
+    const recentCount = 6;
+    const oldestCount = 2;
+    const older = messages.slice(0, oldestCount);
+    const middle = messages.slice(oldestCount, messages.length - recentCount);
+    const recent = messages.slice(messages.length - recentCount);
+
+    const oldVerbatim = older
       .map((message) => `${message.authorRole}: ${message.text}`)
       .join("\n");
-    const prompt = [
-      "You are SOVEREIGN, an outcome-first autonomous assistant.",
-      "Give concise, practical replies and suggest next action when useful.",
-      this.#buildAgentContext(activeAgent),
-      `Conversation:\n${history}`,
-      `User message:\n${text}`
-    ]
-      .filter(Boolean)
-      .join("\n\n");
 
-    try {
-      const completion = await this.llmService.respond({
-        modelRef: modelPlan.modelRef,
-        fallbacks: modelPlan.fallbacks,
-        prompt,
-        temperature: 0.2,
-        maxTokens: 500
-      });
-      return truncate(completion.text, 2000);
-    } catch (error) {
-      return `LLM error: ${error instanceof Error ? error.message : String(error)}`;
+    const recentVerbatim = recent
+      .map((message) => `${message.authorRole}: ${message.text}`)
+      .join("\n");
+
+    const middleVerbatim = middle
+      .map((message) => `${message.authorRole}: ${message.text}`)
+      .join("\n");
+
+    let middleSummary = "";
+    if (middle.length > 0 && this.llmService && modelPlan) {
+      try {
+        const prompt = `Summarize the following conversation turns as densely as possible. Retain all key facts, entities, decisions, and outcomes. Omit pleasantries.
+
+${middleVerbatim}`;
+        const summaryResponse = await this.llmService.respond({
+          modelRef: modelPlan.modelRef,
+          fallbacks: modelPlan.fallbacks,
+          prompt,
+          temperature: 0,
+          maxTokens: 500
+        });
+        middleSummary = (summaryResponse.text || "Summary failed.").trim();
+      } catch (e) {
+        middleSummary = "[Trajectory Compression Failed: Context omitted to save memory.]";
+      }
+    } else if (middle.length > 0) {
+      middleSummary = "[Trajectory Compression Unavailable: Context summarized manually via text truncation.]";
     }
+
+    return [
+      "--- Initial Context ---",
+      oldVerbatim,
+      "--- Compressed Context (Middle Turns) ---",
+      `[CONTEXT SUMMARY]: ${middleSummary}`,
+      "--- Recent Actions ---",
+      recentVerbatim
+    ].filter(Boolean).join("\n");
+  }
+
+  #buildToolManifest() {
+    if (!this.pluginService) {
+      return "(no tools available)";
+    }
+    const plugins = this.pluginService.listPlugins();
+    if (plugins.length === 0) {
+      return "(no tools available)";
+    }
+    const lines = [];
+    for (const plugin of plugins) {
+      for (const tool of plugin.tools ?? []) {
+        const params = tool.inputSchema?.properties
+          ? Object.entries(tool.inputSchema.properties)
+              .map(([key, val]) => `${key}: ${val.type ?? "any"} — ${val.description ?? ""}`)
+              .join(", ")
+          : "none";
+        lines.push(`- **${plugin.id}.${tool.name}**: ${tool.description ?? "no description"} | Params: ${params}`);
+      }
+    }
+    return lines.join("\n");
+  }
+
+  #extractToolCall(text) {
+    // Try to extract a JSON tool-call block from the LLM output (legacy format)
+    const jsonBlockMatch = text.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
+    const candidate = jsonBlockMatch ? jsonBlockMatch[1].trim() : null;
+    if (!candidate) {
+      // Also try if the entire text is a JSON object
+      const rawTrimmed = text.trim();
+      if (rawTrimmed.startsWith("{") && rawTrimmed.endsWith("}")) {
+        try {
+          const parsed = JSON.parse(rawTrimmed);
+          if (parsed && typeof parsed === "object" && typeof parsed.action === "string") {
+            return parsed;
+          }
+        } catch { /* not parseable */ }
+      }
+      return null;
+    }
+    try {
+      const parsed = JSON.parse(candidate);
+      if (parsed && typeof parsed === "object" && typeof parsed.action === "string") {
+        return parsed;
+      }
+    } catch {
+      // Not a tool call — just a normal text reply
+    }
+    return null;
   }
 
   async #resolveChatModelPlan(workspaceId = null, preferredAgentId = null) {

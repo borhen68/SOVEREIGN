@@ -1,0 +1,11 @@
+{
+  "id": "dialectic-memory",
+  "name": "Deep Dialectic Memory Engine",
+  "version": "1.0.0",
+  "description": "The Honcho Killer: Autonomously extracts and remembers user preferences, workflows, and psychological profiles to permanently adapt the agent to the user.",
+  "entry": "index.js",
+  "permissions": {
+    "network": false,
+    "filesystem": true
+  }
+}

@@ -132,6 +132,49 @@ function splitMarkdownChunks(text, maxChunkChars = 900) {
   return chunks;
 }
 
+async function fetchEmbedding(text, dim = 1536) {
+  const apiKey = process.env.OPENROUTER_API_KEY ?? process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    return hashToVector(text, dim);
+  }
+  try {
+    const isOpenRouter = Boolean(process.env.OPENROUTER_API_KEY);
+    const baseUrl = process.env.OPENAI_BASE_URL ?? (isOpenRouter ? "https://openrouter.ai/api/v1" : "https://api.openai.com/v1");
+    // Default to a widely supported embedding model on OpenRouter, or OpenAI's text-embedding-3-small
+    const model = process.env.EMBEDDING_MODEL ?? (isOpenRouter ? "openai/text-embedding-3-small" : "text-embedding-3-small");
+
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), 8000);
+    const res = await fetch(`${baseUrl}/embeddings`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://sovereign-agent.io",
+        "X-Title": "SOVEREIGN Agent"
+      },
+      body: JSON.stringify({ input: text, model }),
+      signal: controller.signal
+    });
+    clearTimeout(id);
+
+    if (res.ok) {
+      const data = await res.json();
+      const vec = data.data?.[0]?.embedding;
+      if (Array.isArray(vec)) {
+        if (vec.length === dim) return vec;
+        if (vec.length > dim) return vec.slice(0, dim);
+        const padded = Array(dim).fill(0);
+        for (let i = 0; i < vec.length; i++) padded[i] = vec[i];
+        return padded;
+      }
+    }
+  } catch (err) {
+    // Ignore and fallback
+  }
+  return hashToVector(text, dim);
+}
+
 function hashToVector(text, dim = 64) {
   const vector = Array.from({ length: dim }, () => 0);
   const tokens = tokenize(text);
@@ -406,7 +449,7 @@ export class MemoryEngineService {
   constructor(options = {}) {
     this.store = options.store;
     this.graphRagService = options.graphRagService ?? null;
-    this.vectorDim = clampInt(options.vectorDim, 64, 8, 512);
+    this.vectorDim = clampInt(options.vectorDim, 1536, 8, 8192);
     this.chunkChars = clampInt(options.chunkChars, 900, 200, 4000);
     this.hybridAlpha = Number.isFinite(Number(options.hybridAlpha))
       ? Math.max(0, Math.min(1, Number(options.hybridAlpha)))
@@ -421,7 +464,7 @@ export class MemoryEngineService {
     this.embeddingCache = new Map();
   }
 
-  indexDocument(input = {}) {
+  async indexDocument(input = {}) {
     const workspaceId = safeString(input.workspaceId, "default");
     const sourceId = safeString(input.sourceId, makeId("source"));
     const text = safeString(input.text);
@@ -436,7 +479,7 @@ export class MemoryEngineService {
     for (let i = 0; i < chunks.length; i += 1) {
       const chunkText = chunks[i];
       const tokenFreq = tokenizeWithFreq(chunkText);
-      const vector = this.#embedCached(chunkText);
+      const vector = await this.#embedCached(chunkText);
       const concepts = extractConcepts(chunkText, this.graphMaxConcepts);
       const entities = extractEntities(chunkText, concepts, this.graphMaxConcepts);
       const relations = extractRelations(chunkText, entities, this.graphMaxConcepts * 2);
@@ -492,7 +535,7 @@ export class MemoryEngineService {
     }
 
     const queryFreq = tokenizeWithFreq(query);
-    const queryVector = this.#embedCached(query);
+    const queryVector = await this.#embedCached(query);
     const queryConcepts = extractConcepts(query, this.graphMaxConcepts);
     const queryEntities = extractEntities(query, queryConcepts, this.graphMaxConcepts);
     const queryEntityKeys = queryEntities.map((entity) => entity.key);
@@ -1280,7 +1323,7 @@ export class MemoryEngineService {
     };
   }
 
-  #embedCached(text) {
+  async #embedCached(text) {
     const key = safeString(text).slice(0, 2000);
     if (this.embeddingCache.has(key)) {
       const cached = this.embeddingCache.get(key);
@@ -1288,7 +1331,7 @@ export class MemoryEngineService {
       this.embeddingCache.set(key, cached);
       return cached;
     }
-    const embedded = hashToVector(text, this.vectorDim);
+    const embedded = await fetchEmbedding(text, this.vectorDim);
     this.embeddingCache.set(key, embedded);
     if (this.embeddingCache.size > this.embeddingCacheMax) {
       const oldest = this.embeddingCache.keys().next().value;

@@ -137,10 +137,60 @@ test("company API pauses at runtime on low consensus and resumes from checkpoint
   let councilCalls = 0;
   api.councilService.runCouncil = async () => {
     councilCalls += 1;
+    const artifactBody = [
+      "# Workstream Deliverable",
+      "",
+      "## Strategic read",
+      "- The team analyzed the objective and identified key execution milestones.",
+      "- Evidence was collected from multiple internal and external sources to validate assumptions.",
+      "- Risk assessment completed with mitigation strategies documented.",
+      "",
+      "## Recommended actions",
+      "- Define owner-assigned tasks for each workstream.",
+      "- Define KPI checkpoints for each milestone.",
+      "- Validate assumptions against the cited external sources.",
+      "",
+      "## Risks and blockers",
+      "- External evidence gap on certain workstreams requires further investigation."
+    ].join("\n");
     return {
       id: `council-mock-${councilCalls}`,
       consensus: {
         consensusScore: 0.2
+      },
+      contributions: [
+        {
+          id: `contrib-mock-${councilCalls}`,
+          trackTitle: "Execution",
+          agentId: "agent-mock",
+          agentName: "Mock Builder",
+          agentSkills: ["engineering"],
+          confidence: 0.5,
+          keyInsights: ["Key insight from mock council analysis."],
+          recommendedActions: [
+            "Define owner-assigned tasks for each workstream.",
+            "Define KPI checkpoints for each milestone."
+          ],
+          blockers: [],
+          executionArtifact: {
+            title: "Execution deliverable",
+            format: "markdown",
+            body: artifactBody,
+            acceptanceCriteria: [
+              "Includes at least one concrete deliverable or next step.",
+              "Captures evidence used or explicitly names the evidence gap.",
+              "Documents blockers, risks, or unresolved questions."
+            ]
+          },
+          webFindings: []
+        }
+      ],
+      finalBriefing: {
+        recommendedPlan: [
+          "Define owner-assigned tasks for each workstream.",
+          "Define KPI checkpoints for each milestone.",
+          "Validate assumptions against cited external sources."
+        ]
       }
     };
   };

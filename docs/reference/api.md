@@ -62,6 +62,11 @@ console.log(run);
   - `GET /api/observability/events`
   - `GET /api/observability/metrics`
   - `GET /api/observability/traces`
+- Dashboard and setup:
+  - `GET /api/dashboard/snapshot`
+  - `GET /api/setup/doctor`
+  - `POST /api/setup/wizard/run`
+  - `GET /api/setup/wizard/runs`
 - Gateway control plane:
   - `GET /api/gateway/status`
   - `GET /api/gateway/ws-info`

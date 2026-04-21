@@ -50,6 +50,12 @@ function percentile(sortedValues, pct) {
 export class ObservabilityService {
   constructor(options = {}) {
     this.store = options.store;
+    this.councilService = options.councilService ?? null;
+    this.failureStreak = 0;
+  }
+
+  setCouncilService(service) {
+    this.councilService = service;
   }
 
   record(input = {}) {
@@ -76,6 +82,29 @@ export class ObservabilityService {
       costUsd: Number.isFinite(Number(input.costUsd)) ? Math.max(0, Number(input.costUsd)) : null,
       createdAt: toTimestamp(input.createdAt, nowIso()) ?? nowIso()
     });
+
+    // SELF-HEALING ENGINE
+    if (event.level === "error" || event.type?.includes("failed")) {
+      this.failureStreak += 1;
+      if (this.failureStreak >= 3 && this.councilService) {
+        this.failureStreak = 0; // Reset
+        this.record({
+           source: "higher-consciousness",
+           type: "self_healing.start",
+           level: "warning",
+           message: "Higher Consciousness triggered: Detecting consecutive failures. Summoning Repair Council..."
+        });
+        this.councilService.runCouncil(event.missionId ?? "system", {
+           problem: `The system has failed 3 times in a row. Latest error: ${event.message}. Analyze the logs and use 'core-mutator.propose_core_upgrade' to fix the underlying code bug!`,
+           mainAgentId: "pro-hacker", // Assuming a default admin agent
+           teamSize: 3,
+           allowWebResearch: true
+        }).catch(() => {});
+      }
+    } else if (event.level === "info") {
+       this.failureStreak = 0;
+    }
+
     return event;
   }
 

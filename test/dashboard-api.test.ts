@@ -62,7 +62,8 @@ test("dashboard HTML route serves marketing UI", async () => {
 
   assert.equal(response.status, 200);
   assert.equal(typeof response.body, "string");
-  assert.equal(response.body.includes("SOVEREIGN Live Company Dashboard"), true);
+  assert.equal(response.body.includes("SOVEREIGN - Command Center"), true);
+  assert.equal(response.body.includes("Company Orchestrator"), true);
   assert.equal(
     Object.values(response.headers).some((value) => String(value).includes("text/html")),
     true
@@ -104,4 +105,6 @@ test("dashboard snapshot API returns orchestrator, debate, and risk data", async
   assert.ok(Array.isArray(snapshotResponse.body.snapshot.council.debateFeed));
   assert.ok(Array.isArray(snapshotResponse.body.snapshot.risk.latestActions));
   assert.ok(Array.isArray(snapshotResponse.body.snapshot.observability.events));
+  assert.ok(snapshotResponse.body.snapshot.setup.readiness);
+  assert.equal(typeof snapshotResponse.body.snapshot.setup.readiness.score, "number");
 });

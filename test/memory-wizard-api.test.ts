@@ -140,6 +140,12 @@ test("memory API indexes and searches, wizard API scaffolds setup", async () => 
 
   const missionFile = path.join(cwd, workspaceDir, "MISSION.md");
   assert.equal(fs.existsSync(missionFile), true);
+  const agentsFile = path.join(cwd, workspaceDir, "AGENTS.md");
+  assert.equal(fs.existsSync(agentsFile), true);
+  assert.ok(wizardRes.body.run.result.readiness);
+  assert.equal(typeof wizardRes.body.run.result.readiness.score, "number");
+  assert.ok(Array.isArray(wizardRes.body.run.result.specialistAgentIds));
+  assert.ok(wizardRes.body.run.result.specialistAgentIds.length >= 3);
 
   const runsRes = await callApi(api.handler, {
     method: "GET",
@@ -155,4 +161,13 @@ test("memory API indexes and searches, wizard API scaffolds setup", async () => 
   });
   assert.equal(runRes.status, 200);
   assert.equal(runRes.body.run.id, wizardRunId);
+
+  const doctorRes = await callApi(api.handler, {
+    method: "GET",
+    url: `/api/setup/doctor?workspaceId=default&workspaceDir=${encodeURIComponent(workspaceDir)}`
+  });
+  assert.equal(doctorRes.status, 200);
+  assert.equal(typeof doctorRes.body.report.score, "number");
+  assert.ok(Array.isArray(doctorRes.body.report.checks));
+  assert.ok(doctorRes.body.report.checks.length >= 5);
 });

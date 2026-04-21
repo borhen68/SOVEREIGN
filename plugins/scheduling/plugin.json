@@ -1,0 +1,11 @@
+{
+  "id": "scheduling",
+  "name": "Autonomous Heartbeat & Scheduling",
+  "version": "1.0.0",
+  "description": "Allows the agent to schedule its own periodic missions and routines. Essential for long-term goal autonomy.",
+  "entry": "index.js",
+  "permissions": {
+    "network": false,
+    "filesystem": true
+  }
+}

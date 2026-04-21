@@ -25,6 +25,11 @@
 .DS_Store
 *.pem
 /.data/
+mcp_servers.json
+.vscode/
+.idea/
+test-openrouter.mjs
+love_message.pdf
 
 # debug
 npm-debug.log*

@@ -53,6 +53,8 @@ export function buildOpenApiSpec(baseUrl = "http://localhost:3001") {
     servers: [{ url: baseUrl }],
     tags: [
       { name: "System" },
+      { name: "Dashboard" },
+      { name: "Setup" },
       { name: "Gateway" },
       { name: "LLM" },
       { name: "Agents" },
@@ -99,6 +101,43 @@ export function buildOpenApiSpec(baseUrl = "http://localhost:3001") {
         get: {
           tags: ["System"],
           operationId: "getPersistenceStatus",
+          responses: jsonResponse()
+        }
+      },
+      "/api/dashboard/snapshot": {
+        get: {
+          tags: ["Dashboard"],
+          operationId: "getDashboardSnapshot",
+          responses: jsonResponse()
+        }
+      },
+      "/api/setup/doctor": {
+        get: {
+          tags: ["Setup"],
+          operationId: "getSetupDoctor",
+          responses: jsonResponse()
+        }
+      },
+      "/api/setup/wizard/run": {
+        post: {
+          tags: ["Setup"],
+          operationId: "runSetupWizard",
+          requestBody: bodyRequest(true),
+          responses: jsonResponse()
+        }
+      },
+      "/api/setup/wizard/runs": {
+        get: {
+          tags: ["Setup"],
+          operationId: "listSetupWizardRuns",
+          responses: jsonResponse()
+        }
+      },
+      "/api/setup/wizard/{runId}": {
+        get: {
+          tags: ["Setup"],
+          operationId: "getSetupWizardRun",
+          parameters: idPathParam("runId", "Wizard run identifier"),
           responses: jsonResponse()
         }
       },

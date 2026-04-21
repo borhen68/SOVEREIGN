@@ -71,6 +71,34 @@ function decodeAuthMeta(scopes: unknown) {
     }
 }
 
+function normalizeWizardData(input: unknown) {
+    if (!input || typeof input !== "object" || Array.isArray(input)) {
+        return {};
+    }
+    return input as Record<string, any>;
+}
+
+function mapWizardRunRecord(run: any) {
+    const data = normalizeWizardData(run?.data);
+    const steps = Array.isArray(data.steps)
+        ? data.steps.map((item) => String(item)).filter(Boolean)
+        : [];
+    const result =
+        data.result && typeof data.result === "object" && !Array.isArray(data.result)
+            ? data.result
+            : {};
+    return {
+        id: run.id,
+        workspaceId: run.workspaceId,
+        status: run.status,
+        step: run.step,
+        steps,
+        result,
+        createdAt: toIso(run.createdAt),
+        updatedAt: toIso(run.updatedAt)
+    };
+}
+
 /**
  * PrismaDataStore
  * 
@@ -1412,52 +1440,79 @@ export class PrismaDataStore {
     // --- Wizard ---
 
     async createWizardRun(run: any) {
+        const steps = Array.isArray(run.steps) ? run.steps.map((item: any) => String(item)).filter(Boolean) : [];
+        const result =
+            run.result && typeof run.result === "object" && !Array.isArray(run.result)
+                ? run.result
+                : {};
+        const step = String(run.step ?? steps[steps.length - 1] ?? "wizard.run").trim();
         await prisma.wizardRun.create({
             data: {
                 id: run.id,
                 workspaceId: run.workspaceId,
                 status: run.status,
-                step: run.step,
-                data: run.data,
+                step,
+                data: {
+                    steps,
+                    result
+                },
                 createdAt: toDate(run.createdAt) || new Date(),
                 updatedAt: toDate(run.updatedAt) || new Date()
             }
         });
-        return run;
+        return {
+            id: run.id,
+            workspaceId: run.workspaceId,
+            status: run.status,
+            step,
+            steps,
+            result,
+            createdAt: run.createdAt,
+            updatedAt: run.updatedAt
+        };
     }
 
     async updateWizardRun(runId: string, partial: any) {
+        const existing = await prisma.wizardRun.findUnique({
+            where: { id: runId }
+        });
+        const existingData = normalizeWizardData(existing?.data);
+        const nextSteps = Array.isArray(partial.steps)
+            ? partial.steps.map((item: any) => String(item)).filter(Boolean)
+            : Array.isArray(existingData.steps)
+                ? existingData.steps
+                : [];
+        const nextResult =
+            partial.result && typeof partial.result === "object" && !Array.isArray(partial.result)
+                ? partial.result
+                : existingData.result && typeof existingData.result === "object" && !Array.isArray(existingData.result)
+                    ? existingData.result
+                    : {};
+        const nextData = {
+            ...existingData,
+            ...(partial.data && typeof partial.data === "object" && !Array.isArray(partial.data) ? partial.data : {}),
+            steps: nextSteps,
+            result: nextResult
+        };
         const data: any = { updatedAt: new Date() };
         if (partial.status) data.status = partial.status;
-        if (partial.step) data.step = partial.step;
-        if (partial.data) data.data = partial.data;
+        if (partial.step) {
+            data.step = partial.step;
+        } else if (nextSteps.length > 0) {
+            data.step = nextSteps[nextSteps.length - 1];
+        }
+        data.data = nextData;
 
         const updated = await prisma.wizardRun.update({
             where: { id: runId },
             data
         });
-        return {
-            id: updated.id,
-            workspaceId: updated.workspaceId,
-            status: updated.status,
-            step: updated.step,
-            data: updated.data,
-            createdAt: toIso(updated.createdAt),
-            updatedAt: toIso(updated.updatedAt)
-        };
+        return mapWizardRunRecord(updated);
     }
 
     async getWizardRunById(runId: string) {
         const run = await prisma.wizardRun.findUnique({ where: { id: runId } });
-        return run ? {
-            id: run.id,
-            workspaceId: run.workspaceId,
-            status: run.status,
-            step: run.step,
-            data: run.data,
-            createdAt: toIso(run.createdAt),
-            updatedAt: toIso(run.updatedAt)
-        } : null;
+        return run ? mapWizardRunRecord(run) : null;
     }
 
     async listWizardRuns(workspaceId: string | null = null) {
@@ -1467,15 +1522,7 @@ export class PrismaDataStore {
             where,
             orderBy: { createdAt: 'desc' }
         });
-        return runs.map(run => ({
-            id: run.id,
-            workspaceId: run.workspaceId,
-            status: run.status,
-            step: run.step,
-            data: run.data,
-            createdAt: toIso(run.createdAt),
-            updatedAt: toIso(run.updatedAt)
-        }));
+        return runs.map((run) => mapWizardRunRecord(run));
     }
 
     // --- Company Orchestrator ---

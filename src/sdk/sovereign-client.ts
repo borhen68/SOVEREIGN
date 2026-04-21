@@ -113,6 +113,14 @@ export class SovereignClient {
     return this.request("GET", "/api/system/persistence");
   }
 
+  async getDashboardSnapshot(query: any = {}) {
+    return this.request("GET", "/api/dashboard/snapshot", { query });
+  }
+
+  async getSetupDoctor(query: any = {}) {
+    return this.request("GET", "/api/setup/doctor", { query });
+  }
+
   async getGatewayStatus() {
     return this.request("GET", "/api/gateway/status");
   }

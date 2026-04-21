@@ -1,0 +1,7 @@
+{
+  "id": "mcp-client",
+  "name": "MCP Provider",
+  "version": "1.0.0",
+  "description": "Dynamically discovers and loads external tools from configured Model Context Protocol servers.",
+  "entry": "./index.ts"
+}

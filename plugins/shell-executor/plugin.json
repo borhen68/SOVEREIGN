@@ -1,0 +1,11 @@
+{
+  "id": "shell-executor",
+  "name": "Shell Execution Engine",
+  "version": "1.0.0",
+  "description": "Allows the agent to execute shell commands directly on the host machine to compile code, run tests, and manage files.",
+  "entry": "index.js",
+  "permissions": {
+    "network": true,
+    "filesystem": true
+  }
+}

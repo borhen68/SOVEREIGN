@@ -36,7 +36,7 @@ import { NodeService } from "./services/node-service.js";
 import { TailscaleExposureService } from "./services/tailscale-exposure-service.js";
 import { GatewayWebsocketService } from "./services/gateway-websocket-service.js";
 import { DeviceBridgeService } from "./services/device-bridge-service.js";
-import { jsonResponse, readJsonBody } from "./lib/http.js";
+import { jsonResponse, readBearerToken, readJsonBody } from "./lib/http.js";
 import { initializeTracing } from "./lib/tracing-bootstrap.js";
 import { renderDashboardPage } from "./lib/dashboard-page.js";
 import { loadEnvFile } from "./lib/env-loader.js";
@@ -75,6 +75,53 @@ function getErrorStatus(error) {
     return code;
   }
   return 500;
+}
+
+function safeString(value, fallback = "") {
+  const normalized = String(value ?? "").trim();
+  return normalized || fallback;
+}
+
+function unauthorizedError(reason) {
+  const error = new Error(`Unauthorized: ${safeString(reason, "access denied")}.`);
+  error.statusCode = 401;
+  return error;
+}
+
+function gatewayHttpScopes(method, parts) {
+  if (method === "GET" && parts.length === 3 && (parts[2] === "status" || parts[2] === "ws-info")) {
+    return ["gateway:read"];
+  }
+  if (parts.length >= 4 && parts[2] === "bridge") {
+    return ["gateway:read"];
+  }
+  if (method === "GET" && parts.length === 3 && parts[2] === "nodes") {
+    return ["gateway:read"];
+  }
+  if (method === "POST" && parts.length === 4 && parts[2] === "nodes" && parts[3] === "register") {
+    return ["gateway:admin"];
+  }
+  if (method === "GET" && parts.length === 4 && parts[2] === "nodes") {
+    return ["gateway:read"];
+  }
+  if (method === "POST" && parts.length === 5 && parts[2] === "nodes" && parts[4] === "invoke") {
+    return ["gateway:node:invoke", "gateway:write", "gateway:admin"];
+  }
+  if (parts.length >= 4 && parts[2] === "browser") {
+    if (method === "GET" && (parts[3] === "status" || parts[3] === "targets")) {
+      return ["gateway:read"];
+    }
+    if (method === "POST" && ["start", "stop", "open", "cdp"].includes(parts[3])) {
+      return ["gateway:browser:control", "gateway:write", "gateway:admin"];
+    }
+  }
+  if (parts.length >= 4 && parts[2] === "tailscale") {
+    if (method === "GET" && parts[3] === "status") {
+      return ["gateway:read"];
+    }
+    return ["gateway:admin"];
+  }
+  return ["gateway:admin"];
 }
 
 export function createApi(options = {}) {
@@ -133,8 +180,10 @@ export function createApi(options = {}) {
     missionService,
     agentService,
     webResearchService,
-    skillService
+    skillService,
+    llmService
   );
+  observabilityService.setCouncilService(councilService);
   const commandQueue = new CommandQueue({
     maxConcurrent: Number(options.maxConcurrent ?? process.env.QUEUE_MAX_CONCURRENT ?? 4),
     defaultLaneConcurrency: Number(
@@ -227,6 +276,13 @@ export function createApi(options = {}) {
     browserControlService,
     tailscaleExposureService,
     observabilityService,
+    authorizeConnection: (input) =>
+      securityFabricService.authorizeAccess({
+        token: input.token,
+        workspaceId: input.workspaceId,
+        channelId: input.channelId ?? "gateway",
+        requiredScopes: input.requiredScopes
+      }),
     path: options.gatewayWsPath ?? process.env.GATEWAY_WS_PATH
   });
   if (typeof runtimeTrustService.setChannelGatewayService === "function") {
@@ -269,6 +325,8 @@ export function createApi(options = {}) {
     store,
     cwd,
     workspaceRoot: cwd,
+    authRequired: options.securityAuthRequired ?? process.env.SECURITY_REQUIRE_AUTH !== "false",
+    bootstrapToken: options.securityBootstrapToken ?? process.env.SECURITY_BOOTSTRAP_TOKEN,
     keyPath: options.securityKeyPath ?? process.env.SECURITY_KEY_PATH,
     secretsPath: options.securitySecretsPath ?? process.env.SECURITY_SECRETS_PATH,
     rateWindowMs: options.securityRateWindowMs ?? process.env.SECURITY_RATE_WINDOW_MS,
@@ -323,7 +381,17 @@ export function createApi(options = {}) {
     cwd,
     agentService,
     tunnelService,
-    observabilityService
+    observabilityService,
+    llmService,
+    securityFabricService,
+    channelGatewayService,
+    webResearchService,
+    heartbeatService,
+    autopilotService,
+    browserControlService,
+    deviceBridgeService,
+    nodeService,
+    stateBackendService
   });
   const dashboardService = new DashboardService({
     companyOrchestratorService,
@@ -335,13 +403,27 @@ export function createApi(options = {}) {
     autopilotService,
     heartbeatService,
     channelGatewayService,
-    commandQueue
+    commandQueue,
+    setupWizardService
   });
 
   const handler = async (req, res) => {
     const method = req.method ?? "GET";
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
     const parts = parsePath(url.pathname);
+
+    const requireAccess = async ({ workspaceId = "default", channelId = "gateway", requiredScopes = [] } = {}) => {
+      const decision = await securityFabricService.authorizeAccess({
+        token: readBearerToken(req, url),
+        workspaceId,
+        channelId,
+        requiredScopes
+      });
+      if (!decision.authorized) {
+        throw unauthorizedError(decision.reason);
+      }
+      return decision;
+    };
 
     try {
       if (store.waitUntilReady) {
@@ -409,6 +491,11 @@ export function createApi(options = {}) {
       }
 
       if (parts.length >= 3 && parts[0] === "api" && parts[1] === "gateway") {
+        await requireAccess({
+          workspaceId: url.searchParams.get("workspaceId") ?? "default",
+          channelId: "gateway",
+          requiredScopes: gatewayHttpScopes(method, parts)
+        });
         if (method === "GET" && parts.length === 3 && parts[2] === "status") {
           return jsonResponse(res, 200, {
             gateway: gatewayWebsocketService.getStatus(),
@@ -687,6 +774,11 @@ export function createApi(options = {}) {
 
       if (parts.length >= 3 && parts[0] === "api" && parts[1] === "security") {
         if (method === "GET" && parts.length === 3 && parts[2] === "pairings") {
+          await requireAccess({
+            workspaceId: url.searchParams.get("workspaceId") ?? "default",
+            channelId: "security",
+            requiredScopes: ["security:admin"]
+          });
           const pairings = await securityFabricService.listPairings({
             workspaceId: url.searchParams.get("workspaceId") ?? undefined,
             channelId: url.searchParams.get("channelId") ?? undefined,
@@ -696,25 +788,50 @@ export function createApi(options = {}) {
         }
         if (method === "POST" && parts.length === 4 && parts[2] === "pairings" && parts[3] === "create") {
           const body = await readJsonBody(req);
+          await requireAccess({
+            workspaceId: body.workspaceId ?? "default",
+            channelId: "security",
+            requiredScopes: ["security:admin"]
+          });
           const pairing = await securityFabricService.createGatewayPairing(body);
           return jsonResponse(res, 201, pairing);
         }
         if (method === "POST" && parts.length === 4 && parts[2] === "pairings" && parts[3] === "verify") {
           const body = await readJsonBody(req);
+          await requireAccess({
+            workspaceId: body.workspaceId ?? "default",
+            channelId: "security",
+            requiredScopes: ["security:admin"]
+          });
           const result = await securityFabricService.verifyGatewayPairing(body);
           return jsonResponse(res, 200, result);
         }
         if (method === "POST" && parts.length === 4 && parts[2] === "auth" && parts[3] === "issue") {
           const body = await readJsonBody(req);
+          await requireAccess({
+            workspaceId: body.workspaceId ?? "default",
+            channelId: "security",
+            requiredScopes: ["security:admin"]
+          });
           const issued = await securityFabricService.issueAuthToken(body);
           return jsonResponse(res, 201, issued);
         }
         if (method === "POST" && parts.length === 4 && parts[2] === "auth" && parts[3] === "verify") {
           const body = await readJsonBody(req);
+          await requireAccess({
+            workspaceId: body.workspaceId ?? "default",
+            channelId: "security",
+            requiredScopes: ["security:admin"]
+          });
           const verified = await securityFabricService.verifyAuthToken(body);
           return jsonResponse(res, 200, verified);
         }
         if (method === "GET" && parts.length === 4 && parts[2] === "rate" && parts[3] === "events") {
+          await requireAccess({
+            workspaceId: url.searchParams.get("workspaceId") ?? "default",
+            channelId: "security",
+            requiredScopes: ["security:admin"]
+          });
           const events = await securityFabricService.listRateEvents({
             workspaceId: url.searchParams.get("workspaceId") ?? undefined,
             channelId: url.searchParams.get("channelId") ?? undefined,
@@ -724,26 +841,51 @@ export function createApi(options = {}) {
         }
         if (method === "POST" && parts.length === 4 && parts[2] === "rate" && parts[3] === "check") {
           const body = await readJsonBody(req);
+          await requireAccess({
+            workspaceId: body.workspaceId ?? "default",
+            channelId: "security",
+            requiredScopes: ["security:admin"]
+          });
           const result = await securityFabricService.checkRateLimit(body);
           return jsonResponse(res, 200, result);
         }
         if (method === "POST" && parts.length === 4 && parts[2] === "sandbox" && parts[3] === "check") {
           const body = await readJsonBody(req);
+          await requireAccess({
+            workspaceId: body.workspaceId ?? "default",
+            channelId: "security",
+            requiredScopes: ["security:admin"]
+          });
           const result = await securityFabricService.checkFilesystemPath(body);
           return jsonResponse(res, 200, result);
         }
         if (method === "GET" && parts.length === 3 && parts[2] === "secrets") {
           const workspaceId = url.searchParams.get("workspaceId") ?? "default";
+          await requireAccess({
+            workspaceId,
+            channelId: "security",
+            requiredScopes: ["security:admin"]
+          });
           const keys = await securityFabricService.listSecretKeys(workspaceId);
           return jsonResponse(res, 200, { workspaceId, keys });
         }
         if (method === "POST" && parts.length === 4 && parts[2] === "secrets" && parts[3] === "set") {
           const body = await readJsonBody(req);
+          await requireAccess({
+            workspaceId: body.workspaceId ?? "default",
+            channelId: "security",
+            requiredScopes: ["security:admin"]
+          });
           const result = await securityFabricService.setSecret(body);
           return jsonResponse(res, 201, result);
         }
         if (method === "POST" && parts.length === 4 && parts[2] === "secrets" && parts[3] === "get") {
           const body = await readJsonBody(req);
+          await requireAccess({
+            workspaceId: body.workspaceId ?? "default",
+            channelId: "security",
+            requiredScopes: ["security:admin"]
+          });
           const result = await securityFabricService.getSecret(body);
           return jsonResponse(res, 200, result);
         }
@@ -951,6 +1093,14 @@ export function createApi(options = {}) {
             return jsonResponse(res, 200, { job });
           }
         }
+      }
+
+      if (method === "GET" && parts.length === 3 && parts[0] === "api" && parts[1] === "setup" && parts[2] === "doctor") {
+        const report = await setupWizardService.runDoctor({
+          workspaceId: url.searchParams.get("workspaceId") ?? undefined,
+          workspaceDir: url.searchParams.get("workspaceDir") ?? undefined
+        });
+        return jsonResponse(res, 200, { report });
       }
 
       if (parts.length >= 4 && parts[0] === "api" && parts[1] === "setup" && parts[2] === "wizard") {
@@ -1361,19 +1511,23 @@ export function startServer(options = {}) {
   const bind = options.gatewayBind ?? process.env.GATEWAY_BIND ?? undefined;
   const api = createApi(options);
   const server = http.createServer(api.handler);
-  server.on("upgrade", (req, socket, head) => {
-    const handledGateway =
-      api.gatewayWebsocketService &&
-      typeof api.gatewayWebsocketService.handleUpgrade === "function"
-        ? api.gatewayWebsocketService.handleUpgrade(req, socket, head)
-        : false;
-    const handledBridge =
-      !handledGateway &&
-      api.deviceBridgeService &&
-      typeof api.deviceBridgeService.handleUpgrade === "function"
-        ? api.deviceBridgeService.handleUpgrade(req, socket, head)
-        : false;
-    if (!handledGateway && !handledBridge) {
+  server.on("upgrade", async (req, socket, head) => {
+    try {
+      const handledGateway =
+        api.gatewayWebsocketService &&
+        typeof api.gatewayWebsocketService.handleUpgrade === "function"
+          ? await api.gatewayWebsocketService.handleUpgrade(req, socket, head)
+          : false;
+      const handledBridge =
+        !handledGateway &&
+        api.deviceBridgeService &&
+        typeof api.deviceBridgeService.handleUpgrade === "function"
+          ? await api.deviceBridgeService.handleUpgrade(req, socket, head)
+          : false;
+      if (!handledGateway && !handledBridge) {
+        socket.destroy();
+      }
+    } catch {
       socket.destroy();
     }
   });

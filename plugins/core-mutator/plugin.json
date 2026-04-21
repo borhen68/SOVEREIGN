@@ -1,0 +1,11 @@
+{
+  "id": "core-mutator",
+  "name": "Core self-Mutating Engine",
+  "version": "1.0.0",
+  "description": "The Meta-AI Architecture: Allows the agent to open Pull Requests targeting its own internal TypeScript engines. Essential for self-improvement.",
+  "entry": "index.js",
+  "permissions": {
+    "network": false,
+    "filesystem": true
+  }
+}

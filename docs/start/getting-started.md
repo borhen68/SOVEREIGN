@@ -13,6 +13,8 @@ You give one objective, the agent company executes with safety controls.
 
 ```bash
 cp .env.example .env
+npm install
+export SECURITY_BOOTSTRAP_TOKEN="change-me-now"
 npm run start
 ```
 
@@ -27,6 +29,27 @@ Open:
 - `http://localhost:3001/health`
 - `http://localhost:3001/dashboard`
 - `http://localhost:3001/api/openapi`
+
+## Recommended First-Run Flow
+
+1. Run the setup wizard:
+
+```bash
+curl -X POST http://localhost:3001/api/setup/wizard/run \
+  -H "Content-Type: application/json" \
+  -d '{
+    "workspaceId": "default",
+    "personaName": "SOVEREIGN"
+  }'
+```
+
+2. Check readiness:
+
+```bash
+curl "http://localhost:3001/api/setup/doctor?workspaceId=default"
+```
+
+3. Open `/dashboard` and watch the readiness panel until blockers are gone.
 
 ## First Objective
 

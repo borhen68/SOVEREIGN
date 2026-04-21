@@ -14,6 +14,19 @@ const SENSITIVE_VALUE_PATTERNS = [
   /\bAKIA[0-9A-Z]{16}\b/g
 ];
 
+const DANGEROUS_PATTERNS = [
+  { pattern: /\brm\s+(-[^\s]*\s+)*\//i, description: "delete in root path" },
+  { pattern: /\brm\s+-[^\s]*r/i, description: "recursive delete" },
+  { pattern: /\bchmod\s+(-[^\s]*\s+)*(777|666|o\+[rwx]*w|a\+[rwx]*w)\b/i, description: "world/other-writable permissions" },
+  { pattern: /\bmkfs\b/i, description: "format filesystem" },
+  { pattern: /\bdd\s+.*if=/i, description: "disk copy" },
+  { pattern: />\s*\/dev\/sd/i, description: "write to block device" },
+  { pattern: /\bkill\s+-9\s+-1\b/i, description: "kill all processes" },
+  { pattern: /:\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/, description: "fork bomb" },
+  { pattern: /\b(curl|wget)\b.*\|\s*(ba)?sh\b/i, description: "pipe remote content to shell" },
+  { pattern: />>?\s*["']?(?:\/etc\/|\/dev\/sd|\/root\/)/i, description: "overwrite sensitive system file" }
+];
+
 const KEYWORDS = {
   [ActionType.DESTRUCTIVE]: [
     "delete",
@@ -191,6 +204,7 @@ export class RuntimeTrustService {
     this.store = options.store;
     this.policyEngine = options.policyEngine;
     this.missionService = options.missionService ?? null;
+    this.llmService = options.llmService ?? null;
     this.clock = typeof options.clock === "function" ? options.clock : nowIso;
     this.defaultPolicyPreset = normalizePolicyPreset(options.defaultPolicyPreset, "balanced");
     this.maxSnapshotChars = Number.isFinite(Number(options.maxSnapshotChars))
@@ -304,6 +318,65 @@ export class RuntimeTrustService {
       allowed = !requiresApproval || context.bypassApproval === true;
     }
 
+    // AI Sentinel: Smart Approval for Shell Commands
+    if (params.input?.command) {
+      const cmdString = String(params.input.command).trim();
+      let flaggedReason = null;
+      for (const rule of DANGEROUS_PATTERNS) {
+        if (rule.pattern.test(cmdString)) {
+          flaggedReason = rule.description;
+          break;
+        }
+      }
+
+      if (flaggedReason) {
+        // Evaluate true risk with zero-temp LLM Sentinel
+        if (this.llmService) {
+          const prompt = `You are a security reviewer for an AI coding agent. A terminal command was flagged by pattern matching as potentially dangerous.
+
+Command: ${cmdString}
+Flagged reason: ${flaggedReason}
+
+Assess the ACTUAL risk of this command. Many flagged commands are false positives. 
+Rules:
+- APPROVE if the command is clearly safe (benign script execution, safe file operations, development tools, package installs, git operations, etc.)
+- DENY if the command could genuinely damage the system (recursive delete of important paths, overwriting system files, fork bombs, wiping disks, dropping databases, etc.)
+- ESCALATE if you're uncertain
+
+Respond with exactly one word: APPROVE, DENY, or ESCALATE`;
+          
+          try {
+            const sentinelRes = await this.llmService.respond({
+              prompt,
+              temperature: 0,
+              maxTokens: 10
+            });
+            const answer = String(sentinelRes.text || "").toUpperCase().trim();
+            if (answer.includes("APPROVE")) {
+              // Smart Approval Overrides
+              allowed = true;
+              requiresApproval = false;
+              approvalReason = "AI Sentinel: Safe";
+            } else {
+              // AI Sentinel denies or escalates => require human approval
+              allowed = false;
+              requiresApproval = true;
+              approvalReason = `Command blocked by AI Sentinel: ${flaggedReason}`;
+            }
+          } catch(e) {
+            // Fails safe => fallback to manual approval if LLM fails
+            allowed = false;
+            requiresApproval = true;
+            approvalReason = `Command flagged: ${flaggedReason}`;
+          }
+        } else {
+          allowed = false;
+          requiresApproval = true;
+          approvalReason = `Command flagged: ${flaggedReason}`;
+        }
+      }
+    }
+
     const runtimeAction = await this.store.createRuntimeAction({
       id: makeId("runtime"),
       pluginId,
@@ -371,6 +444,156 @@ export class RuntimeTrustService {
       updatedAt,
       finishedAt: updatedAt
     });
+  }
+
+  /**
+   * OpenClaw-style Dynamic Tool Auto-Correction.
+   *
+   * Wraps a tool invocation with an iterative micro-retry loop.
+   * On failure, the error is analyzed via LLM to produce corrected inputs,
+   * then the tool is re-invoked — up to `maxMicroRetries` times (default 3).
+   *
+   * This surpasses macro-level retry (which re-runs the entire workstream)
+   * by surgically fixing the failing tool call in-place.
+   *
+   * @param {object} params
+   * @param {Function} params.invokeFn - Async function(input) that executes the tool.
+   * @param {object}  params.input - Original tool input.
+   * @param {object}  params.toolMeta - { pluginId, toolName, description, inputSchema }.
+   * @param {object}  params.context - Mission/workspace context for observability.
+   * @param {object}  [params.llmService] - LlmService instance for self-correction prompts.
+   * @param {number}  [params.maxMicroRetries=3] - Max correction iterations.
+   * @returns {{ result, attempts, corrected }}
+   */
+  async invokeWithAutoCorrection(params = {}) {
+    const invokeFn = params.invokeFn;
+    if (typeof invokeFn !== "function") {
+      throw new Error("invokeWithAutoCorrection requires an invokeFn.");
+    }
+
+    const maxMicroRetries = Math.max(1, Math.min(Number(params.maxMicroRetries) || 3, 5));
+    const llmService = params.llmService ?? null;
+    const toolMeta = params.toolMeta && typeof params.toolMeta === "object" ? params.toolMeta : {};
+    const context = params.context && typeof params.context === "object" ? params.context : {};
+    let currentInput = params.input && typeof params.input === "object" ? { ...params.input } : {};
+    const attempts = [];
+
+    for (let attempt = 1; attempt <= maxMicroRetries; attempt += 1) {
+      try {
+        const result = await invokeFn(currentInput);
+        return {
+          result,
+          attempts,
+          corrected: attempt > 1,
+          totalAttempts: attempt,
+          finalInput: currentInput
+        };
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        const statusCode = Number(error?.statusCode);
+
+        // Don't retry on 4xx client errors (bad request, auth, approval required)
+        if (Number.isInteger(statusCode) && statusCode >= 400 && statusCode < 500) {
+          attempts.push({
+            attempt,
+            error: errorMessage,
+            statusCode,
+            action: "abort_client_error"
+          });
+          throw error;
+        }
+
+        attempts.push({
+          attempt,
+          error: errorMessage,
+          statusCode: Number.isInteger(statusCode) ? statusCode : null,
+          action: attempt < maxMicroRetries ? "will_correct" : "exhausted"
+        });
+
+        // If this was the last attempt or no LLM available, give up
+        if (attempt >= maxMicroRetries || !llmService || typeof llmService.respond !== "function") {
+          throw error;
+        }
+
+        // OpenClaw-style: ask LLM to analyze the failure and suggest corrected input
+        try {
+          const correctionPrompt = this.#buildCorrectionPrompt({
+            toolMeta,
+            originalInput: currentInput,
+            errorMessage,
+            attempt,
+            context
+          });
+
+          const correction = await llmService.respond({
+            prompt: correctionPrompt,
+            system: "You are an autonomous tool-correction agent. Analyze the tool failure and return ONLY valid JSON with the corrected input object. No markdown fences, no explanation — just the JSON object.",
+            temperature: 0.1,
+            maxTokens: 600,
+            autoFallbackProviders: true
+          });
+
+          const parsed = this.#extractJsonFromText(correction.text);
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            currentInput = { ...currentInput, ...parsed };
+            attempts[attempts.length - 1].correctedInput = true;
+            attempts[attempts.length - 1].correctionModelRef = correction.modelRef ?? null;
+          }
+        } catch {
+          // If the correction LLM call itself fails, continue with existing input
+          attempts[attempts.length - 1].correctionFailed = true;
+        }
+      }
+    }
+
+    // Should not reach here, but safety net
+    throw new Error(`Tool auto-correction exhausted after ${maxMicroRetries} attempts.`);
+  }
+
+  #buildCorrectionPrompt(params = {}) {
+    const tool = params.toolMeta ?? {};
+    const parts = [
+      `A tool invocation failed and you must produce corrected input to retry it.`,
+      ``,
+      `Tool: ${safeString(tool.pluginId)}.${safeString(tool.toolName)}`,
+      tool.description ? `Description: ${tool.description}` : "",
+      `Attempt: ${params.attempt ?? 1}`,
+      ``,
+      `Error message:`,
+      safeString(params.errorMessage, "Unknown error"),
+      ``,
+      `Original input (JSON):`,
+      JSON.stringify(params.originalInput ?? {}, null, 2),
+      ``
+    ];
+
+    if (tool.inputSchema) {
+      parts.push(`Expected input schema (JSON Schema):`, JSON.stringify(tool.inputSchema, null, 2), ``);
+    }
+
+    parts.push(
+      `Analyze the error and return a corrected JSON input object that fixes the issue.`,
+      `Return ONLY the corrected JSON object. No explanations.`
+    );
+
+    return parts.filter(Boolean).join("\n");
+  }
+
+  #extractJsonFromText(text) {
+    const raw = safeString(text);
+    if (!raw) {
+      return null;
+    }
+    const start = raw.indexOf("{");
+    const end = raw.lastIndexOf("}");
+    if (start === -1 || end === -1 || end < start) {
+      return null;
+    }
+    try {
+      return JSON.parse(raw.slice(start, end + 1));
+    } catch {
+      return null;
+    }
   }
 
   #resolveActionType(params) {

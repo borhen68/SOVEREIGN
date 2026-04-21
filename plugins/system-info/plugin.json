@@ -1,0 +1,11 @@
+{
+  "id": "system-info",
+  "name": "System Info Plugin",
+  "version": "0.1.0",
+  "description": "Provides native tools to read system hardware metrics (CPU, RAM, OS, Uptime).",
+  "entry": "index.js",
+  "permissions": {
+    "network": false,
+    "filesystem": false
+  }
+}

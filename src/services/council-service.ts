@@ -96,6 +96,11 @@ function uniqueStrings(values) {
   return [...new Set(values.map((item) => String(item).trim()).filter(Boolean))];
 }
 
+function safeString(value, fallback = "") {
+  const normalized = String(value ?? "").trim();
+  return normalized || fallback;
+}
+
 function clampInt(value, fallback, min, max) {
   const parsed = Number(value);
   if (!Number.isInteger(parsed)) {
@@ -227,6 +232,57 @@ function dedupePreservingOrder(values) {
   return [...new Set(values)];
 }
 
+function extractJsonObject(text) {
+  const raw = safeString(text);
+  if (!raw) {
+    return null;
+  }
+  const start = raw.indexOf("{");
+  const end = raw.lastIndexOf("}");
+  if (start === -1 || end === -1 || end < start) {
+    return null;
+  }
+  try {
+    return JSON.parse(raw.slice(start, end + 1));
+  } catch {
+    return null;
+  }
+}
+
+function normalizeStringArray(input, minItems = 0, maxItems = 6) {
+  if (!Array.isArray(input)) {
+    return [];
+  }
+  const values = dedupePreservingOrder(
+    input.map((item) => safeString(item)).filter(Boolean)
+  );
+  return values.slice(0, Math.max(minItems, maxItems));
+}
+
+function clampConfidenceScore(value, fallback = 0.65) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return Number(fallback.toFixed(2));
+  }
+  return Number(Math.max(0, Math.min(1, parsed)).toFixed(2));
+}
+
+function normalizeArtifact(input, fallback = {}) {
+  const source = input && typeof input === "object" ? input : {};
+  return {
+    title: safeString(source.title, safeString(fallback.title, "Execution artifact")),
+    format: safeString(source.format, safeString(fallback.format, "markdown")),
+    body: safeString(source.body, safeString(fallback.body)),
+    acceptanceCriteria: normalizeStringArray(
+      source.acceptanceCriteria,
+      0,
+      6
+    ).length > 0
+      ? normalizeStringArray(source.acceptanceCriteria, 0, 6)
+      : normalizeStringArray(fallback.acceptanceCriteria, 0, 6)
+  };
+}
+
 function normalizeSeedFindings(seedFindings) {
   if (!Array.isArray(seedFindings)) {
     return [];
@@ -283,19 +339,52 @@ function buildEvidenceSummary(findings, limit = 2) {
     .join(" | ");
 }
 
+function summarizeSpeakerSkills(agent) {
+  const skills = normalizeSkills(agent).slice(0, 2);
+  return skills.length > 0 ? skills.join(", ") : "general review";
+}
+
+function buildFallbackDebateMessage(input) {
+  const track = safeString(input.targetContribution?.trackTitle, "the plan");
+  const firstInsight = safeString(input.targetContribution?.keyInsights?.[0], "the current proposal");
+  const firstAction = safeString(input.targetContribution?.recommendedActions?.[0], "tighten the execution plan");
+  const firstBlocker = safeString(input.targetContribution?.blockers?.[0]);
+  const evidenceCount = Array.isArray(input.targetContribution?.webFindings)
+    ? input.targetContribution.webFindings.length
+    : 0;
+  const skillSummary = summarizeSpeakerSkills(input.speaker);
+
+  if (input.role === "challenge") {
+    if (firstBlocker) {
+      return `From a ${skillSummary} angle, ${track} still leaves "${firstBlocker}" unresolved and needs a clearer owner before execution.`;
+    }
+    if (evidenceCount === 0) {
+      return `From a ${skillSummary} angle, ${track} depends on unverified assumptions and needs external evidence before commitment.`;
+    }
+    return `From a ${skillSummary} angle, ${track} needs a tighter KPI and rollback path; right now "${firstInsight}" is directionally strong but still too loose to ship.`;
+  }
+
+  if (evidenceCount > 0) {
+    return `I will tighten ${track.toLowerCase()} by ${firstAction.toLowerCase()} and keep the cited evidence attached so the next decision stays verifiable.`;
+  }
+  return `I will tighten ${track.toLowerCase()} by ${firstAction.toLowerCase()} and add explicit validation steps before we move forward.`;
+}
+
 export class CouncilService {
   store: any;
   missionService: any;
   agentService: any;
   webResearchService: any;
   skillService: any;
+  llmService: any;
 
-  constructor(store, missionService, agentService, webResearchService, skillService = null) {
+  constructor(store, missionService, agentService, webResearchService, skillService = null, llmService = null) {
     this.store = store;
     this.missionService = missionService;
     this.agentService = agentService;
     this.webResearchService = webResearchService;
     this.skillService = skillService;
+    this.llmService = llmService;
   }
 
   async listMissionCouncils(missionId) {
@@ -455,7 +544,7 @@ export class CouncilService {
         contributions.push(contribution);
       }
 
-      const discussion = this.#buildDiscussion(contributions, subAgents, debateRounds);
+      const discussion = await this.#buildDiscussion(contributions, subAgents, debateRounds);
       const consensus = this.#buildConsensus(contributions);
       const finalBriefing = this.#buildFinalBriefing({
         mission,
@@ -675,9 +764,8 @@ export class CouncilService {
 
     const soul = normalizeSoul(agent);
     const soulStyle = soul.communicationStyle;
-    const confidence = estimateConfidence(agent, workstream, webFindings.length);
     const activatedSkill = input.activatedSkill ?? null;
-    const keyInsights = [
+    const fallbackKeyInsights = [
       `${agent.name} frames ${workstream.trackTitle.toLowerCase()} around "${soul.mission || "delivery and clarity"}".`,
       activatedSkill
         ? `Activated skill "${activatedSkill.name}" (${activatedSkill.created ? "new" : "reused"}) to execute this track.`
@@ -687,6 +775,61 @@ export class CouncilService {
         ? `External evidence collected: ${webFindings.length} finding(s).`
         : "No external evidence collected in this pass."
     ];
+    const fallbackRecommendedActions = recommendedActionsForContribution({
+      trackTitle: workstream.trackTitle,
+      webFindings
+    });
+    const fallbackBlockers =
+      webFindings.length > 0
+        ? []
+        : [`External evidence gap on ${workstream.trackTitle.toLowerCase()}.`];
+    const fallbackArtifact = {
+      title: `${workstream.trackTitle} deliverable`,
+      format: "markdown",
+      body: [
+        `# ${workstream.trackTitle}`,
+        "",
+        `## Strategic read`,
+        ...fallbackKeyInsights.map((item) => `- ${item}`),
+        "",
+        `## Recommended actions`,
+        ...fallbackRecommendedActions.map((item) => `- ${item}`),
+        "",
+        `## Risks and blockers`,
+        ...(fallbackBlockers.length > 0 ? fallbackBlockers.map((item) => `- ${item}`) : ["- No blocking issues identified in this pass."])
+      ].join("\n"),
+      acceptanceCriteria: [
+        "Includes at least one concrete deliverable or next step.",
+        "Captures evidence used or explicitly names the evidence gap.",
+        "Documents blockers, risks, or unresolved questions."
+      ]
+    };
+    const llmDraft = await this.#draftContributionWithLlm({
+      mission: input.mission,
+      problem: input.problem,
+      workstream,
+      agent,
+      soul,
+      activatedSkill,
+      webFindings
+    });
+    const confidence = clampConfidenceScore(
+      llmDraft?.confidence,
+      estimateConfidence(agent, workstream, webFindings.length)
+    );
+    const keyInsights =
+      normalizeStringArray(llmDraft?.keyInsights, 0, 6).length > 0
+        ? normalizeStringArray(llmDraft.keyInsights, 0, 6)
+        : fallbackKeyInsights;
+    const recommendedActions =
+      normalizeStringArray(llmDraft?.recommendedActions, 0, 6).length > 0
+        ? normalizeStringArray(llmDraft.recommendedActions, 0, 6)
+        : fallbackRecommendedActions;
+    const blockers =
+      normalizeStringArray(llmDraft?.blockers, 0, 6).length > 0
+        ? normalizeStringArray(llmDraft.blockers, 0, 6)
+        : fallbackBlockers;
+    const executionArtifact = normalizeArtifact(llmDraft?.executionArtifact, fallbackArtifact);
 
     return {
       id: makeId("contribution"),
@@ -699,17 +842,83 @@ export class CouncilService {
       soulStyle,
       activatedSkill,
       confidence,
+      analysisMode: llmDraft ? "llm" : "template",
       keyInsights,
-      recommendedActions: recommendedActionsForContribution({
-        trackTitle: workstream.trackTitle,
-        webFindings
-      }),
-      blockers:
-        webFindings.length > 0
-          ? []
-          : [`External evidence gap on ${workstream.trackTitle.toLowerCase()}.`],
+      recommendedActions,
+      blockers,
+      executionArtifact,
       webFindings
     };
+  }
+
+  async #draftContributionWithLlm(input) {
+    if (!this.llmService || typeof this.llmService.respond !== "function") {
+      return null;
+    }
+    const modelRef = this.#resolveAgentModelRef(input.agent);
+    if (!modelRef) {
+      return null;
+    }
+
+    const prompt = [
+      "You are drafting a specialist council contribution for an autonomous agent company.",
+      "Return ONLY JSON with keys: keyInsights, recommendedActions, blockers, confidence, executionArtifact.",
+      "executionArtifact must be an object with title, format, body, acceptanceCriteria.",
+      "",
+      JSON.stringify(
+        {
+          mission: {
+            title: input.mission?.title ?? "",
+            objective: input.mission?.objective ?? ""
+          },
+          problem: input.problem,
+          workstream: {
+            title: input.workstream?.trackTitle ?? input.workstream?.title ?? "",
+            prompt: input.workstream?.prompt ?? ""
+          },
+          agent: {
+            name: input.agent?.name ?? "",
+            skills: Array.isArray(input.agent?.skills) ? input.agent.skills : [],
+            soul: input.soul,
+            activatedSkill: input.activatedSkill
+          },
+          evidence: Array.isArray(input.webFindings)
+            ? input.webFindings.map((item) => ({
+                title: item.title,
+                snippet: item.snippet,
+                url: item.url,
+                source: item.source
+              }))
+            : []
+        },
+        null,
+        2
+      )
+    ].join("\n");
+
+    try {
+      const llm = await this.llmService.respond({
+        modelRef,
+        prompt,
+        system:
+          "Be concrete, evidence-led, and execution-focused. Produce concise JSON only with no markdown fences.",
+        temperature: 0.2,
+        maxTokens: 900
+      });
+      const parsed = extractJsonObject(llm.text);
+      if (!parsed || typeof parsed !== "object") {
+        return null;
+      }
+      return {
+        keyInsights: normalizeStringArray(parsed.keyInsights, 0, 6),
+        recommendedActions: normalizeStringArray(parsed.recommendedActions, 0, 6),
+        blockers: normalizeStringArray(parsed.blockers, 0, 6),
+        confidence: clampConfidenceScore(parsed.confidence, 0.68),
+        executionArtifact: normalizeArtifact(parsed.executionArtifact, {})
+      };
+    } catch {
+      return null;
+    }
   }
 
   async #activateSkillForWorkstream(input) {
@@ -784,60 +993,123 @@ export class CouncilService {
     }
   }
 
-  #buildDiscussion(contributions, subAgents, debateRounds) {
-    if (contributions.length === 1) {
+  async #buildDiscussion(contributions, subAgents, debateRounds) {
+    if (contributions.length <= 1) {
       return [];
     }
     const messages = [];
+
+    // Real sequential LLM debate using each agent's own model
     for (let round = 1; round <= debateRounds; round += 1) {
-      const reviewerShift =
-        subAgents.length > 1 ? ((round - 1) % (subAgents.length - 1)) + 1 : 1;
-      for (let index = 0; index < contributions.length; index += 1) {
-        const contribution = contributions[index];
-        let reviewer = subAgents[(index + reviewerShift) % subAgents.length];
-        if (reviewer && reviewer.id === contribution.agentId && subAgents.length > 1) {
-          reviewer = subAgents[(index + reviewerShift + 1) % subAgents.length];
+      for (let i = 0; i < contributions.length; i++) {
+        const targetContribution = contributions[i];
+        
+        // Find a reviewer (next agent in the circle)
+        const reviewerIndex = (i + 1) % contributions.length;
+        const reviewerContribution = contributions[reviewerIndex];
+        
+        if (reviewerContribution.agentId === targetContribution.agentId) continue;
+
+        const reviewer = subAgents.find(a => a.id === reviewerContribution.agentId);
+        const target = subAgents.find(a => a.id === targetContribution.agentId);
+
+        if (!reviewer || !target) continue;
+
+        // 1. Reviewer issues a challenge
+        const challengeMsg = await this.#draftDebateMessage({
+          speaker: reviewer,
+          role: "challenge",
+          targetContribution,
+          messagesHistory: messages,
+          round
+        });
+
+        if (challengeMsg) {
+          messages.push({
+            id: makeId("discussion"),
+            round,
+            type: "challenge",
+            speakerAgentId: reviewer.id,
+            speakerAgentName: reviewer.name,
+            targetAgentId: target.id,
+            content: challengeMsg
+          });
+
+          // 2. Target responds to the challenge
+          const responseMsg = await this.#draftDebateMessage({
+            speaker: target,
+            role: "response",
+            targetContribution,
+            messagesHistory: messages,
+            round,
+            pendingChallenge: challengeMsg
+          });
+
+          if (responseMsg) {
+            messages.push({
+              id: makeId("discussion"),
+              round,
+              type: "response",
+              speakerAgentId: target.id,
+              speakerAgentName: target.name,
+              targetAgentId: reviewer.id,
+              content: responseMsg
+            });
+          }
         }
-        if (!reviewer || reviewer.id === contribution.agentId) {
-          continue;
-        }
-        const reviewerContribution = contributions.find((item) => item.agentId === reviewer.id) ?? null;
-        const reviewerSkill =
-          reviewerContribution?.activatedSkill?.name ??
-          reviewer.skills?.[0] ??
-          "general review";
-        const targetSkill = contribution.activatedSkill?.name ?? contribution.agentSkills?.[0] ?? "execution";
-        const challenge = {
-          id: makeId("discussion"),
-          round,
-          type: "challenge",
-          speakerAgentId: reviewer.id,
-          speakerAgentName: reviewer.name,
-          targetAgentId: contribution.agentId,
-          content: `${reviewer.name} challenges ${contribution.agentName} using ${reviewerSkill}: pressure-test assumptions and define measurable checkpoints for ${contribution.trackTitle.toLowerCase()}.`
-        };
-        const response = {
-          id: makeId("discussion"),
-          round,
-          type: "response",
-          speakerAgentId: contribution.agentId,
-          speakerAgentName: contribution.agentName,
-          targetAgentId: reviewer.id,
-          content: `${contribution.agentName} responds from ${targetSkill} with tighter owners, KPIs, and risk controls for ${contribution.trackTitle.toLowerCase()}.`
-        };
-        const resolution = {
-          id: makeId("discussion"),
-          round,
-          type: "resolution",
-          speakerAgentId: contribution.agentId,
-          speakerAgentName: contribution.agentName,
-          targetAgentId: null,
-          content: `${contribution.agentName} commits to update this workstream after round ${round} feedback.`
-        };
-        messages.push(challenge, response, resolution);
       }
     }
+    
     return messages;
+  }
+
+  async #draftDebateMessage(input) {
+    if (!this.llmService || typeof this.llmService.respond !== "function") {
+      return buildFallbackDebateMessage(input);
+    }
+    const modelRef = this.#resolveAgentModelRef(input.speaker);
+    if (!modelRef) {
+      return buildFallbackDebateMessage(input);
+    }
+
+    const historyText = input.messagesHistory.map(m => `[Round ${m.round}] ${m.speakerAgentName} -> ${m.type}: ${m.content}`).join("\n");
+    
+    const contextPrompt = [
+       `You are playing the role of agent: ${input.speaker.name} (${input.speaker.title || input.speaker.role}).`,
+       `Your mission: ${input.speaker.soul?.mission || "Review work critically."}`,
+       `Your skills: ${Array.isArray(input.speaker.skills) ? input.speaker.skills.join(", ") : "general logic"}`
+    ].join("\n");
+    
+    const targetPayload = {
+       track: input.targetContribution.trackTitle,
+       insights: input.targetContribution.keyInsights,
+       actions: input.targetContribution.recommendedActions,
+       evidence: input.targetContribution.webFindings.map(f => f.title)
+    };
+
+    const taskPrompt = input.role === "challenge" 
+      ? `Review the following contribution from ${input.targetContribution.agentName}:\n${JSON.stringify(targetPayload, null, 2)}\n\nIssue a concise, critical challenge (max 3 sentences) pointing out flaws, missing evidence, or risks using your specific skills.`
+      : `Respond to the following challenge regarding your contribution:\n--- Challenge ---\n${input.pendingChallenge}\n-----------------\n\nDefend your work or accept the critique with a concise response (max 3 sentences) in character. Focus on actionability.`;
+
+    const prompt = [
+       contextPrompt,
+       historyText.length > 0 ? `\nDebate History so far:\n${historyText}` : "",
+       `\n${taskPrompt}`,
+       "\nReturn ONLY the text of your message, no quotes, no markdown fences."
+    ].join("\n");
+
+    try {
+      const llm = await this.llmService.respond({
+        modelRef,
+        prompt,
+        system: "You are an AI agent in a simulated corporate council debate. Stay in character, be extremely concise, and do not break character.",
+        temperature: 0.3,
+        maxTokens: 250
+      });
+      return llm.text.trim().replace(/^"|"$/g, ""); // Strip leading/trailing quotes if present
+    } catch {
+      return buildFallbackDebateMessage(input);
+    }
   }
 
   #buildConsensus(contributions) {
@@ -943,11 +1215,32 @@ export class CouncilService {
       dissentingViews: input.consensus.dissentingViews,
       teamSoulMap,
       activatedSkills: [...activatedSkillMap.values()],
+      executionArtifacts: input.contributions.map((item) => ({
+        workstreamId: item.workstreamId,
+        trackTitle: item.trackTitle,
+        title: item.executionArtifact?.title ?? null,
+        format: item.executionArtifact?.format ?? null,
+        acceptanceCriteria: item.executionArtifact?.acceptanceCriteria ?? []
+      })),
       spawnedSubAgentIds: input.spawnedSubAgents.map((agent) => agent.id),
       criticalFindings,
       recommendedPlan,
       unresolvedQuestions
     };
+  }
+
+  #resolveAgentModelRef(agent) {
+    const explicit = safeString(agent?.model?.primary);
+    if (explicit) {
+      return explicit;
+    }
+    if (
+      this.llmService &&
+      typeof this.llmService.resolveDefaultModelRef === "function"
+    ) {
+      return safeString(this.llmService.resolveDefaultModelRef());
+    }
+    return "";
   }
 
   async #requireMission(missionId) {

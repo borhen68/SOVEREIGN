@@ -6,29 +6,36 @@ import assert from "node:assert/strict";
 import { createApi } from "../src/server.js";
 import { MinimalWebSocketClient } from "../src/lib/websocket-client.js";
 
+const AUTH_TOKEN = "test-gateway-bootstrap-token";
+
 async function startTestServer(cwd) {
   const api = createApi({
     cwd,
     persistPath: null,
     pluginsDir: path.join(cwd, "dist", "plugins"),
+    securityBootstrapToken: AUTH_TOKEN,
     autopilotAutoStart: false,
     heartbeatAutoStart: false,
     port: 0
   });
   const server = http.createServer(api.handler);
-  server.on("upgrade", (req, socket, head) => {
-    const handledGateway =
-      api.gatewayWebsocketService &&
-      typeof api.gatewayWebsocketService.handleUpgrade === "function"
-        ? api.gatewayWebsocketService.handleUpgrade(req, socket, head)
-        : false;
-    const handledBridge =
-      !handledGateway &&
-      api.deviceBridgeService &&
-      typeof api.deviceBridgeService.handleUpgrade === "function"
-        ? api.deviceBridgeService.handleUpgrade(req, socket, head)
-        : false;
-    if (!handledGateway && !handledBridge) {
+  server.on("upgrade", async (req, socket, head) => {
+    try {
+      const handledGateway =
+        api.gatewayWebsocketService &&
+        typeof api.gatewayWebsocketService.handleUpgrade === "function"
+          ? await api.gatewayWebsocketService.handleUpgrade(req, socket, head)
+          : false;
+      const handledBridge =
+        !handledGateway &&
+        api.deviceBridgeService &&
+        typeof api.deviceBridgeService.handleUpgrade === "function"
+          ? await api.deviceBridgeService.handleUpgrade(req, socket, head)
+          : false;
+      if (!handledGateway && !handledBridge) {
+        socket.destroy();
+      }
+    } catch {
       socket.destroy();
     }
   });
@@ -108,7 +115,8 @@ test("device bridge registers companion node and serves remote node.invoke", asy
   const invokeResponse = await fetch(`${baseUrl}/api/gateway/nodes/macos-test-node/invoke`, {
     method: "POST",
     headers: {
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${AUTH_TOKEN}`
     },
     body: JSON.stringify({
       action: "location.get",
@@ -123,7 +131,11 @@ test("device bridge registers companion node and serves remote node.invoke", asy
   assert.equal(invokeBody.invocation.result.from, "companion-test");
   assert.equal(invokeBody.invocation.result.action, "location.get");
 
-  const bridgeNodesResponse = await fetch(`${baseUrl}/api/gateway/bridge/nodes`);
+  const bridgeNodesResponse = await fetch(`${baseUrl}/api/gateway/bridge/nodes`, {
+    headers: {
+      Authorization: `Bearer ${AUTH_TOKEN}`
+    }
+  });
   const bridgeNodesBody = await bridgeNodesResponse.json();
   assert.equal(bridgeNodesResponse.status, 200);
   assert.equal(Array.isArray(bridgeNodesBody.nodes), true);

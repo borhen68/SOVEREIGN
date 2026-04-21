@@ -70,6 +70,10 @@ export class SecurityFabricService {
     this.store = options.store;
     this.cwd = options.cwd ?? process.cwd();
     this.workspaceRoot = path.resolve(options.workspaceRoot ?? this.cwd);
+    this.authRequired = options.authRequired ?? process.env.SECURITY_REQUIRE_AUTH !== "false";
+    this.bootstrapToken = safeString(
+      options.bootstrapToken ?? process.env.SECURITY_BOOTSTRAP_TOKEN
+    );
     this.rateWindowMs = clampInt(options.rateWindowMs ?? process.env.SECURITY_RATE_WINDOW_MS, 60000, 1000, 3600000);
     this.windowRequestCap = clampInt(
       options.windowRequestCap ?? process.env.SECURITY_WINDOW_REQUEST_CAP,
@@ -215,16 +219,88 @@ export class SecurityFabricService {
 
   async verifyAuthToken(input = {}) {
     const token = safeString(input.token);
-    const workspaceId = safeString(input.workspaceId, "default");
-    const channelId = safeString(input.channelId, "").toLowerCase();
-    const requiredScope = safeString(input.requiredScope).toLowerCase();
     if (!token) {
       throw this.#badRequest("token is required.");
     }
 
+    const result = await this.authorizeAccess({
+      token,
+      workspaceId: input.workspaceId,
+      channelId: input.channelId,
+      requiredScopes:
+        Array.isArray(input.requiredScopes) && input.requiredScopes.length > 0
+          ? input.requiredScopes
+          : safeString(input.requiredScope)
+            ? [input.requiredScope]
+            : [],
+      allowBootstrap: input.allowBootstrap !== false
+    });
+
+    return {
+      valid: result.authorized,
+      reason: result.reason,
+      auth: result.auth ?? null,
+      scopes: result.scopes ?? []
+    };
+  }
+
+  async authorizeAccess(input = {}) {
+    const token = safeString(input.token);
+    const workspaceId = safeString(input.workspaceId, "default");
+    const channelId = safeString(input.channelId, "").toLowerCase();
+    const requiredScopes = uniqueLower(
+      Array.isArray(input.requiredScopes)
+        ? input.requiredScopes
+        : safeString(input.requiredScope)
+          ? [input.requiredScope]
+          : []
+    );
+    const allowBootstrap = input.allowBootstrap !== false;
+
+    if (!this.authRequired) {
+      return {
+        authorized: true,
+        reason: "auth-disabled",
+        kind: "disabled",
+        workspaceId,
+        channelId,
+        scopes: ["*"],
+        auth: null
+      };
+    }
+
+    if (!token) {
+      return {
+        authorized: false,
+        reason: "missing-token",
+        workspaceId,
+        channelId,
+        scopes: [],
+        auth: null
+      };
+    }
+
+    if (allowBootstrap && this.bootstrapToken && token === this.bootstrapToken) {
+      return {
+        authorized: true,
+        reason: "bootstrap-token",
+        kind: "bootstrap",
+        workspaceId,
+        channelId,
+        scopes: ["*"],
+        auth: {
+          id: "bootstrap",
+          workspaceId,
+          channelId: channelId || "*",
+          scopes: ["*"],
+          status: "active",
+          bootstrap: true
+        }
+      };
+    }
+
     const tokens = await this.store.listSecurityAuthTokens({
       workspaceId,
-      channelId: channelId || undefined,
       limit: 2000
     });
     const now = Date.now();
@@ -238,15 +314,20 @@ export class SecurityFabricService {
       if (!timingSafeHashMatch(token, entry.tokenDigest)) {
         continue;
       }
-      if (requiredScope && !Array.isArray(entry.scopes)) {
+      if (!this.#matchesChannel(entry.channelId, channelId)) {
         continue;
       }
-      if (requiredScope && !entry.scopes.includes(requiredScope)) {
+      const scopes = uniqueLower(Array.isArray(entry.scopes) ? entry.scopes : []);
+      if (!this.#scopesPermit(scopes, requiredScopes)) {
         continue;
       }
       return {
-        valid: true,
+        authorized: true,
         reason: "ok",
+        kind: "issued",
+        workspaceId,
+        channelId,
+        scopes,
         auth: {
           ...entry,
           tokenDigest: undefined
@@ -255,8 +336,12 @@ export class SecurityFabricService {
     }
 
     return {
-      valid: false,
-      reason: "invalid-or-expired"
+      authorized: false,
+      reason: "invalid-or-expired",
+      workspaceId,
+      channelId,
+      scopes: [],
+      auth: null
     };
   }
 
@@ -440,6 +525,45 @@ export class SecurityFabricService {
       normalizedCandidate === normalizedRoot ||
       normalizedCandidate.startsWith(`${normalizedRoot}${path.sep}`)
     );
+  }
+
+  #matchesChannel(tokenChannelId, requestedChannelId) {
+    const tokenChannel = safeString(tokenChannelId, "").toLowerCase();
+    const requested = safeString(requestedChannelId, "").toLowerCase();
+    if (!requested) {
+      return true;
+    }
+    if (!tokenChannel || tokenChannel === "*" || tokenChannel === "global") {
+      return true;
+    }
+    return tokenChannel === requested;
+  }
+
+  #scopesPermit(tokenScopes, requiredScopes) {
+    if (!Array.isArray(requiredScopes) || requiredScopes.length === 0) {
+      return true;
+    }
+    const normalizedTokenScopes = uniqueLower(Array.isArray(tokenScopes) ? tokenScopes : []);
+    if (normalizedTokenScopes.includes("*") || normalizedTokenScopes.includes("admin")) {
+      return true;
+    }
+    return requiredScopes.some((scope) => {
+      const normalized = safeString(scope).toLowerCase();
+      if (!normalized) {
+        return false;
+      }
+      if (normalizedTokenScopes.includes(normalized)) {
+        return true;
+      }
+      const parts = normalized.split(":");
+      while (parts.length > 1) {
+        parts.pop();
+        if (normalizedTokenScopes.includes(`${parts.join(":")}:*`)) {
+          return true;
+        }
+      }
+      return false;
+    });
   }
 
   #ensureSecretKey() {

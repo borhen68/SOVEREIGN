@@ -4,8 +4,16 @@
   "description": "SOVEREIGN v1 MVP API - mission contracts, runtime policy, approvals, and closure metrics.",
   "type": "module",
   "main": "dist/src/server.js",
+  "bin": {
+    "sovereign": "dist/src/cli/run.js"
+  },
   "scripts": {
+    "postinstall": "prisma generate",
     "build": "node scripts/build.mjs",
+    "repo:audit": "node scripts/repo-audit.mjs",
+    "repo:audit:strict": "node scripts/repo-audit.mjs --strict",
+    "run": "npm run build && node dist/src/cli/run.js",
+    "stream:reasoning": "npm run build && node dist/src/cli/stream-reasoning.js",
     "openapi:export": "npm run build && node scripts/export-openapi.mjs",
     "dev": "npm run build && node --watch dist/src/server.js",
     "start": "npm run build && node dist/src/server.js",
@@ -14,6 +22,7 @@
     "worker:prod": "node dist/src/worker.js",
     "ui": "npm run build && node dist/src/cli/local-ui.js",
     "companion:macos": "npm run build && node dist/src/companion/macos-node.js",
+    "companion:windows": "npm run build && node dist/src/companion/windows-node.js",
     "test": "npm run build && node --test dist/test/*.test.js",
     "check": "npm run build && node --test dist/test/*.test.js"
   },
@@ -27,8 +36,11 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@openrouter/sdk": "^0.12.16",
     "@prisma/client": "^6.19.2",
     "pg": "^8.18.0",
+    "playwright": "^1.59.1",
     "redis": "^5.11.0"
   }
 }

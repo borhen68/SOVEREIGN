@@ -1,0 +1,11 @@
+{
+  "id": "webhook-router",
+  "name": "Mission Webhook Router",
+  "version": "1.0.0",
+  "description": "Hermes-Routines Killer: Converts Webhooks (e.g. from GitHub, Slack) directly into highly-orchestrated multi-agent Missions with Trust Checkpoints.",
+  "entry": "index.js",
+  "permissions": {
+    "network": true,
+    "filesystem": false
+  }
+}

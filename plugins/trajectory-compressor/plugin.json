@@ -1,0 +1,11 @@
+{
+  "id": "trajectory-compressor",
+  "name": "RL Trajectory Compressor",
+  "version": "1.0.0",
+  "description": "Continuous Self-Improvement: Automatically intercepts and compresses successful Multi-Agent Debates into clean JSONL instruction datasets for fine-tuning.",
+  "entry": "index.js",
+  "permissions": {
+    "network": false,
+    "filesystem": true
+  }
+}

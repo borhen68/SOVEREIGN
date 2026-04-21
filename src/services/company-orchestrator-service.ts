@@ -1,6 +1,7 @@
 // @ts-nocheck
 import { makeId } from "../lib/id.js";
 import { nowIso } from "../lib/time.js";
+import { ActionType } from "../domain/constants.js";
 
 export const COMPANY_STATUS = Object.freeze({
   PLANNING: "planning",
@@ -635,6 +636,15 @@ export class CompanyOrchestratorService {
           };
           const council = await this.#runCouncilQueued(missionId, councilInput);
           const consensus = clampNumber(council?.consensus?.consensusScore, 0, 0, 1);
+          const execution = await this.#materializeWorkstreamExecution({
+            missionId,
+            taskId: task.id,
+            runId,
+            objective,
+            stream,
+            council,
+            attempt
+          });
           await this.missionService.updateTaskStatus(missionId, task.id, "done");
           const result = {
             taskId: task.id,
@@ -642,7 +652,11 @@ export class CompanyOrchestratorService {
             success: true,
             attempt,
             councilId: council.id,
-            consensus
+            consensus,
+            artifact: execution.artifact,
+            validation: execution.validation,
+            evidenceCount: execution.evidenceCount,
+            verificationSources: execution.verificationSources
           };
           executionResults.push(result);
 
@@ -744,11 +758,30 @@ export class CompanyOrchestratorService {
       name: "verification"
     });
 
-    const sources = executionResults.map((item) => ({
-      type: item.success ? "primary" : "web",
-      stance: item.success ? "support" : "contradict",
-      publishedAt: nowIso()
-    }));
+    const sources = executionResults.flatMap((item) => {
+      const explicitSources = Array.isArray(item.verificationSources) ? item.verificationSources : [];
+      if (explicitSources.length > 0) {
+        return explicitSources;
+      }
+      if (item.success) {
+        return [
+          {
+            type: "primary",
+            stance: "support",
+            publishedAt: nowIso(),
+            title: safeString(item.artifact?.title, "Validated workstream artifact")
+          }
+        ];
+      }
+      return [
+        {
+          type: "primary",
+          stance: "contradict",
+          publishedAt: nowIso(),
+          title: safeString(item.error, "Workstream execution failed")
+        }
+      ];
+    });
     const verification = this.verificationEngine.verifyClaim({
       claim: `Objective completed: ${objective}`,
       sources
@@ -763,7 +796,7 @@ export class CompanyOrchestratorService {
 
     const successCount = executionResults.filter((item) => item.success).length;
     const failureCount = executionResults.length - successCount;
-    const summary = `Completed ${successCount}/${executionResults.length} workstreams. Verification: ${verification.verdict}.`;
+    const summary = `Completed ${successCount}/${executionResults.length} workstreams with validated deliverables. Verification: ${verification.verdict}.`;
 
     let evaluation = null;
     const evalSpan = await this.#startSpan({
@@ -846,6 +879,183 @@ export class CompanyOrchestratorService {
       status: finalStatus
     });
     return finalRun;
+  }
+
+  async #materializeWorkstreamExecution(input = {}) {
+    const contributions = Array.isArray(input.council?.contributions) ? input.council.contributions : [];
+    const finalBriefing =
+      input.council?.finalBriefing && typeof input.council.finalBriefing === "object"
+        ? input.council.finalBriefing
+        : {};
+    const recommendedPlan = Array.isArray(finalBriefing.recommendedPlan)
+      ? finalBriefing.recommendedPlan.map((item) => safeString(item)).filter(Boolean)
+      : contributions.flatMap((item) =>
+          Array.isArray(item?.recommendedActions)
+            ? item.recommendedActions.map((action) => safeString(action)).filter(Boolean)
+            : []
+        ).slice(0, 8);
+    const evidenceFindings = this.#collectEvidenceFindings(contributions);
+    const acceptanceCriteria = [
+      ...new Set(
+        contributions
+          .flatMap((item) =>
+            Array.isArray(item?.executionArtifact?.acceptanceCriteria)
+              ? item.executionArtifact.acceptanceCriteria.map((criterion) => safeString(criterion))
+              : []
+          )
+          .filter(Boolean)
+      )
+    ].slice(0, 10);
+    const artifactBody = [
+      `# ${input.stream?.title ?? "Workstream"} deliverable`,
+      "",
+      `Objective: ${safeString(input.objective)}`,
+      `Council session: ${safeString(input.council?.id)}`,
+      "",
+      "## Coordinated plan",
+      ...(recommendedPlan.length > 0
+        ? recommendedPlan.map((item) => `- ${item}`)
+        : ["- No consolidated plan was produced."]),
+      "",
+      "## Specialist outputs",
+      ...contributions.flatMap((item) => {
+        const title = safeString(item?.executionArtifact?.title, item?.trackTitle ?? "Contribution");
+        const body = safeString(item?.executionArtifact?.body);
+        if (!body) {
+          return [`### ${title}`, "- No artifact body was generated for this contribution."];
+        }
+        return [`### ${title}`, body];
+      }),
+      "",
+      "## Evidence",
+      ...(evidenceFindings.length > 0
+        ? evidenceFindings.map((finding) => `- ${finding.title}${finding.url ? ` (${finding.url})` : ""}`)
+        : ["- No external evidence was collected for this workstream."]),
+      "",
+      "## Acceptance criteria",
+      ...(acceptanceCriteria.length > 0
+        ? acceptanceCriteria.map((criterion) => `- ${criterion}`)
+        : ["- Acceptance criteria were not supplied by the council."])
+    ].join("\n");
+
+    const artifact = {
+      title: `${safeString(input.stream?.title, "Workstream")} execution dossier`,
+      format: "markdown",
+      body: artifactBody,
+      acceptanceCriteria
+    };
+    const validation = this.#validateExecutionArtifact({
+      artifact,
+      recommendedPlan,
+      evidenceFindings
+    });
+    if (!validation.passed) {
+      throw new Error(`Execution artifact validation failed: ${validation.reasons.join(" | ")}`);
+    }
+
+    await this.missionService.recordAction(input.missionId, {
+      taskId: input.taskId,
+      actionType: ActionType.READ,
+      summary: `Validated deliverable recorded for ${safeString(input.stream?.title, "workstream")}.`,
+      payload: {
+        runId: input.runId,
+        councilId: input.council?.id ?? null,
+        workstreamId: input.stream?.id ?? null,
+        attempt: input.attempt ?? 1,
+        format: artifact.format,
+        evidenceCount: evidenceFindings.length,
+        acceptanceCriteriaCount: artifact.acceptanceCriteria.length
+      },
+      evidence: [
+        {
+          type: "artifact",
+          content: artifact.body
+        },
+        ...evidenceFindings.slice(0, 6).map((finding) => ({
+          type: "source",
+          content: [finding.title, finding.url, finding.snippet].filter(Boolean).join("\n")
+        }))
+      ]
+    });
+
+    return {
+      artifact,
+      validation,
+      evidenceCount: evidenceFindings.length,
+      verificationSources: [
+        {
+          type: "primary",
+          stance: "support",
+          publishedAt: nowIso(),
+          title: artifact.title
+        },
+        ...evidenceFindings.slice(0, 6).map((finding) => ({
+          type: "web",
+          stance: "support",
+          publishedAt: finding.retrievedAt ?? nowIso(),
+          title: finding.title,
+          url: finding.url,
+          source: finding.source
+        }))
+      ]
+    };
+  }
+
+  #collectEvidenceFindings(contributions) {
+    const seen = new Set();
+    const findings = [];
+    for (const contribution of contributions) {
+      const items = Array.isArray(contribution?.webFindings) ? contribution.webFindings : [];
+      for (const finding of items) {
+        const url = safeString(finding?.url);
+        const title = safeString(finding?.title);
+        if (!url && !title) {
+          continue;
+        }
+        const key = `${url.toLowerCase()}|${title.toLowerCase()}`;
+        if (seen.has(key)) {
+          continue;
+        }
+        seen.add(key);
+        findings.push({
+          title: safeString(finding?.title, "Untitled source"),
+          url: safeString(finding?.url),
+          snippet: safeString(finding?.snippet),
+          source: safeString(finding?.source, "web"),
+          retrievedAt: safeString(finding?.retrievedAt, nowIso())
+        });
+      }
+    }
+    return findings.slice(0, 12);
+  }
+
+  #validateExecutionArtifact(input = {}) {
+    const artifact = input.artifact && typeof input.artifact === "object" ? input.artifact : {};
+    const body = safeString(artifact.body);
+    const recommendedPlan = Array.isArray(input.recommendedPlan) ? input.recommendedPlan : [];
+    const evidenceFindings = Array.isArray(input.evidenceFindings) ? input.evidenceFindings : [];
+    const reasons = [];
+
+    if (body.length < 200) {
+      reasons.push("artifact body is too thin");
+    }
+    if (recommendedPlan.length === 0) {
+      reasons.push("no concrete action plan");
+    }
+    if (!Array.isArray(artifact.acceptanceCriteria) || artifact.acceptanceCriteria.length === 0) {
+      reasons.push("acceptance criteria missing");
+    }
+
+    return {
+      passed: reasons.length === 0,
+      reasons,
+      bodyChars: body.length,
+      recommendedActionCount: recommendedPlan.length,
+      evidenceCount: evidenceFindings.length,
+      acceptanceCriteriaCount: Array.isArray(artifact.acceptanceCriteria)
+        ? artifact.acceptanceCriteria.length
+        : 0
+    };
   }
 
   async #pauseForHuman(input = {}) {

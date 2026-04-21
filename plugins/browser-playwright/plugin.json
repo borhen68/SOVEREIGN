@@ -1,0 +1,11 @@
+{
+  "id": "browser-playwright",
+  "name": "Playwright Browser",
+  "version": "0.1.0",
+  "description": "Native Typescript plugin yielding browser control via Playwright.",
+  "entry": "index.js",
+  "permissions": {
+    "network": true,
+    "filesystem": false
+  }
+}
